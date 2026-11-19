@@ -58,6 +58,51 @@ res = amp.simulate(2e-6, 5e-3, initial="op")      # .tran from the bias point
 print(res.thd("V(c)", 1e3, cycles=2))             # harmonic distortion
 ```
 
+## Drag-and-drop schematic editor
+
+```bash
+python -m openpe editor          # opens http://127.0.0.1:8765 in your browser
+```
+
+<p align="center"><img src="docs/editor.png" width="90%" alt="OpenPE schematic editor with a buck converter and its waveforms"></p>
+
+Draw a circuit, press **▶ Run** and the waveforms appear below the
+schematic. The editor is a single offline HTML page served by a small
+local server, which binds to `127.0.0.1` and only parses netlists.
+
+* **Drag and drop:** drag parts from the searchable palette with mouse, pen
+  or touch. A grid-snapped ghost follows the cursor, and you can rotate it
+  (`R`) or flip it (`F`) before dropping. Clicking a part instead arms
+  click-to-place; hold `Shift` to place several.
+* **Wiring:** drag from any pin to draw a wire. Wires route at right angles
+  automatically, and `/` flips the corner. Click to add bends, and end on
+  any pin or wire to make a T-junction (junction dots appear by
+  themselves). The `W` key gives a dedicated wire tool.
+* **Moving:** move single parts or box/shift selections. Attached wires
+  rubber-band and stay right-angled. Arrow keys nudge, and `Alt`+drag
+  duplicates.
+* **Editing:** rotate, flip, copy/cut/paste (with automatic renaming),
+  duplicate, delete, undo/redo, zoom to the cursor, pan, fit to view and
+  toggle grid snap.
+* **Feedback:** hovering a pin highlights its whole net and names it.
+  Unconnected pins are marked, and control-signal wires are drawn dashed
+  in a different colour from power wires. Connecting a signal to a power
+  node is reported as an error.
+* **Properties panel:** edit names and values with validation. With
+  nothing selected it shows the analyses: transient (from initial
+  conditions or the bias point), operating point, AC and DC sweep.
+* **Results:** stacked waveform plots with a cursor readout, Bode plots
+  with −3 dB corners, DC sweeps, and an operating-point table. After an
+  operating-point run, node voltages are written onto the schematic.
+* **Files:** save and open schematics (`.json`), export the SPICE-like
+  netlist, use the bundled examples, and your session is autosaved in the
+  browser.
+* **Part library:** R, L, C, transformer, DC/sine/square/current sources,
+  ideal, PN and Zener diodes, switch, thyristor, NPN/PNP, NMOS/PMOS,
+  op-amp, DC motor, voltage/current sensors, probes, ground, net labels and
+  17 control blocks (PWM, PI, comparator, dead time, transfer function,
+  sample-and-hold...).
+
 ---
 
 ## Feature overview
@@ -99,7 +144,7 @@ print(res.thd("V(c)", 1e3, cycles=2))             # harmonic distortion
 
 ```bash
 pip install -e ".[dev]"     # numpy + matplotlib + pytest
-pytest -q                   # 74 tests, ~15 s
+pytest -q                   # 81 tests, ~20 s (the browser test runs when Node.js + Playwright are installed)
 ```
 
 ## Examples
@@ -257,10 +302,13 @@ openpe/
   results.py     waveform analysis, plots, CSV
   analysis.py    parameter sweep, injection AC sweep, Monte Carlo, Bode helpers
   netlist.py     text netlist parser
-  __main__.py    command-line interface
+  server.py      local web server for the schematic editor (/api/simulate)
+  editor/        the drag-and-drop schematic editor (single HTML file, no dependencies)
+  __main__.py    command-line interface (run, editor, blocks)
 examples/        runnable showcase scripts (+ output/ plots)
 circuits/        example netlists
-tests/           pytest suite (analytic checks of every feature)
+tests/           pytest suite (analytic checks of every feature, editor API, browser e2e)
+docs/            screenshots
 ```
 
 ## License

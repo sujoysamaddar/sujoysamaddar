@@ -415,6 +415,8 @@ class Simulator:
         rows, names = [], None
         for v in values:
             src.wave = DC(v)
+            if getattr(src, "dc", None) is not None:
+                src.dc = float(v)          # a separate DC value would otherwise win
             x = self._operating_point(ctx)
             if names is None:
                 names = list(ctx._probes)

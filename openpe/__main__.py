@@ -17,22 +17,35 @@ if __package__ in (None, ""):
 
 
 def _measure(res, spec):
-    kind, sig = spec[0].lower(), spec[1]
-    if kind == "mean":
-        return res.mean(sig)
-    if kind == "rms":
-        return res.rms(sig)
-    if kind == "max":
-        return res.max(sig)
-    if kind == "min":
-        return res.min(sig)
-    if kind == "pp":
-        return res.ripple(sig)
-    if kind == "thd":
-        from .units import parse_value
-        f0 = parse_value(spec[2])
-        return res.thd(sig, f0, cycles=int(spec[3]) if len(spec) > 3 else 1)
-    raise ValueError(f"unknown measure {kind}")
+    """Kept for backwards compatibility: see :func:`openpe.measures.measure`."""
+    from .measures import measure
+    return measure(res, spec)
+
+
+def _solve(text, spec, target, save):
+    """--solve LABEL=LO:HI[:log] --target "MEASURE=VALUE"."""
+    from .tuning import solve_for
+    from .units import parse_value
+    try:
+        label, rng = spec.split("=", 1)
+        parts = rng.split(":")
+        if len(parts) not in (2, 3) or not target or "=" not in target:
+            raise ValueError("expected LABEL=LO:HI[:log] together with --target \"MEASURE=VALUE\"")
+        lo, hi = parse_value(parts[0]), parse_value(parts[1])
+        log = len(parts) == 3 and parts[2].lower().startswith("log")
+        meas, val = target.rsplit("=", 1)
+        sol = solve_for(text, label.strip(), meas.strip(), parse_value(val), lo, hi, log=log)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(sol)
+    for k, (v, m) in enumerate(sol.history, 1):
+        print(f"  run {k:>2}: {sol.label} = {v:<14.8g} {sol.spec} = {m:.6g}")
+    if save:
+        with open(save, "w", encoding="utf-8") as fh:
+            fh.write(sol.text)
+        print(f"  tuned netlist written to {save}")
+    return 0 if sol.converged else 1
 
 
 def _sweep(text, title, spec, window, csv_path):
@@ -99,6 +112,12 @@ def main(argv=None):
                    help="override a value without editing the file, e.g. --set R1.value=4.7k --set vin=24 "
                         "(repeatable; see --list-params)")
     r.add_argument("--list-params", action="store_true", help="list the adjustable values and exit")
+    r.add_argument("--solve", metavar="LABEL=LO:HI[:log]",
+                   help="find the value of a parameter that reaches --target, searching between LO and HI "
+                        "(e.g. --solve R1.value=2:50 --target \"overshoot V(b)=20\")")
+    r.add_argument("--target", metavar="MEASURE=VALUE",
+                   help="measurement and the value to reach, for --solve (e.g. \"max V(b)=12\")")
+    r.add_argument("--save", metavar="FILE", help="with --solve: write the tuned netlist to FILE")
     r.add_argument("--sweep", metavar="LABEL=START:STOP:N[:log]",
                    help="re-run for N values of a parameter and tabulate the .measure results, "
                         "e.g. --sweep R1.value=2:50:6:log")
@@ -157,6 +176,8 @@ def main(argv=None):
         return 2
     for w in nl.warnings:
         print(f"warning: {w}", file=sys.stderr)
+    if args.solve:
+        return _solve(text, args.solve, args.target, args.save)
     if args.sweep:
         return _sweep(text, title, args.sweep, args.window, args.csv)
     if not nl.tran and not nl.analyses:
@@ -191,6 +212,13 @@ def main(argv=None):
           f"{st['cpu_time']:.2f} s CPU")
     window = args.window or nl.window
     mres = res.last(window) if window else res
+    if nl.losses is not None:
+        try:
+            lres = res.last(window) if window else res.window(res.t[-1] * 0.5)
+            print(lres.loss_report(nl.losses["devices"] or None, nl.losses["input"] or None,
+                                   nl.losses["output"] or None))
+        except Exception as exc:
+            print(f"warning: .losses: {exc}", file=sys.stderr)
     for m in nl.measures:
         print(f"  {' '.join(m):<30} = {_measure(mres, m):.6g}")
     if args.summary:

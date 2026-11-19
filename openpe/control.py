@@ -619,3 +619,49 @@ class PLL(Block):
         w = 2 * math.pi * self.f0 + self.kp * e + self.xi
         self.theta = (self.theta + w * ctx.dt) % (2 * math.pi)
         return self.theta, w / (2 * math.pi)
+
+
+class LookupTable(Block):
+    """Piecewise-linear table y = f(x) through the points (xs[k], ys[k]).
+    Outside the table the output is held at the end value, or extended along
+    the end slopes when ``extrapolate=True``."""
+
+    def __init__(self, out, inp, xs, ys, extrapolate=False):
+        super().__init__(out, inp)
+        self.xs = [float(v) for v in xs]
+        self.ys = [float(v) for v in ys]
+        if len(self.xs) != len(self.ys) or len(self.xs) < 2:
+            raise ValueError("LookupTable needs xs and ys of the same length (at least 2 points)")
+        if any(b <= a for a, b in zip(self.xs, self.xs[1:])):
+            raise ValueError("LookupTable xs must be strictly increasing")
+        self.extrapolate = bool(extrapolate)
+
+    def step(self, u, ctx):
+        x = u[0]
+        if self.extrapolate and x < self.xs[0]:
+            return self.ys[0] + (x - self.xs[0]) * (self.ys[1] - self.ys[0]) / (self.xs[1] - self.xs[0])
+        if self.extrapolate and x > self.xs[-1]:
+            return self.ys[-1] + (x - self.xs[-1]) * (self.ys[-1] - self.ys[-2]) / (self.xs[-1] - self.xs[-2])
+        return float(np.interp(x, self.xs, self.ys))
+
+
+class SVPWM(Block):
+    """Space-vector (min-max common-mode injection) modulator for a three-phase
+    inverter: three phase-voltage references -> three duty cycles in 0..1.
+
+        duty_k = 1/2 + (v_k - (max(v) + min(v))/2) / vdc
+
+    The injected common-mode term lets the phase references reach vdc/sqrt(3)
+    (15 % more than plain sine PWM, which stops at vdc/2) without
+    over-modulation.  Feed the three duties to PWM blocks.
+    """
+
+    def __init__(self, out_a, out_b, out_c, a, b, c, vdc=1.0):
+        super().__init__([out_a, out_b, out_c], [a, b, c])
+        self.vdc = float(vdc)
+        if self.vdc <= 0:
+            raise ValueError("SVPWM vdc must be > 0")
+
+    def step(self, u, ctx):
+        vcm = 0.5 * (max(u) + min(u))
+        return tuple(min(1.0, max(0.0, 0.5 + (v - vcm) / self.vdc)) for v in u)

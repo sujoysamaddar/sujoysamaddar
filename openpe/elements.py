@@ -376,13 +376,32 @@ class ThreePhaseSource(Element):
 # Switching devices
 # ---------------------------------------------------------------------------
 class _Switching(Element):
+    """Piecewise-linear switching device with optional loss parameters.
+
+    Conduction loss comes from ron and the on-state drop vf.  Switching loss
+    is modelled the way data sheets give it: eon / eoff are the energies
+    (joules) dissipated at turn-on / turn-off measured at the reference
+    blocking voltage ``vref`` and current ``iref``, and scale linearly with
+    the actual voltage and current at each commutation:
+
+        E_on  = eon  * (V_blocking / vref) * (I_after_turn_on  / iref)
+        E_off = eoff * (V_blocking / vref) * (I_before_turn_off / iref)
+
+    The running total is recorded as the probe ``Esw(<name>)`` (joules).
+    """
     is_switching = True
 
-    def __init__(self, name, a, b, ron=1e-3, roff=1e6, vf=0.0):
+    def __init__(self, name, a, b, ron=1e-3, roff=1e6, vf=0.0, eon=0.0, eoff=0.0, vref=1.0, iref=1.0):
         super().__init__(name, a, b)
         self.ron, self.roff, self.vf = float(ron), float(roff), float(vf)
+        self.eon, self.eoff = float(eon), float(eoff)
+        self.vref, self.iref = float(vref), float(iref)
+        if self.vref <= 0 or self.iref <= 0:
+            raise ValueError(f"{name}: vref and iref must be > 0")
         self.on = False
         self._i = 0.0
+        self.esw = 0.0               # accumulated switching energy (J)
+        self._was_on, self._v_prev, self._i_prev = False, 0.0, 0.0
 
     def stamp_A(self, A, ctx):
         stamp_g(A, self.idx[0], self.idx[1], 1.0 / (self.ron if self.on else self.roff))
@@ -412,18 +431,37 @@ class _Switching(Element):
             return True
         return False
 
+    def init(self, ctx):
+        self.esw = 0.0
+        self._was_on, self._v_prev, self._i_prev = False, 0.0, 0.0
+
     def update(self, x, ctx):
-        self._i = self._current(x)
+        v, i = self.voltage(x), self._current(x)
+        if self.on != self._was_on and (self.eon or self.eoff):
+            if self.on:          # turn-on: blocking voltage before, current after
+                self.esw += self.eon * abs(self._v_prev) / self.vref * abs(i) / self.iref
+            else:                # turn-off: current before, blocking voltage after
+                self.esw += self.eoff * abs(v) / self.vref * abs(self._i_prev) / self.iref
+        self._was_on, self._v_prev, self._i_prev, self._i = self.on, v, i, i
 
     def current(self, x):
         return self._i
 
     def probes(self, x):
-        return {f"I({self.name})": self._i}
+        p = {f"I({self.name})": self._i}
+        if self.eon or self.eoff:
+            p[f"Esw({self.name})"] = self.esw
+        return p
 
 
 class Diode(_Switching):
-    """Ideal diode, anode a, cathode b, with optional forward drop vf."""
+    """Ideal diode, anode a, cathode b, with optional forward drop vf.
+
+    erec: reverse-recovery energy (J) at vref / iref, dissipated when the
+    diode turns off (see _Switching)."""
+
+    def __init__(self, name, a, b, ron=1e-3, roff=1e6, vf=0.0, erec=0.0, vref=1.0, iref=1.0, eon=0.0):
+        super().__init__(name, a, b, ron, roff, vf, eon=eon, eoff=erec, vref=vref, iref=iref)
 
     def violation(self, x, ctx):
         if self.on:
@@ -439,17 +477,20 @@ class Switch(_Switching):
                   IGBT module
     """
 
-    def __init__(self, name, a, b, gate, ron=1e-3, roff=1e6, body_diode=False, vf_diode=0.0):
-        super().__init__(name, a, b, ron, roff)
+    def __init__(self, name, a, b, gate, ron=1e-3, roff=1e6, body_diode=False, vf_diode=0.0,
+                 vf=0.0, eon=0.0, eoff=0.0, vref=1.0, iref=1.0, erec=0.0):
+        super().__init__(name, a, b, ron, roff, vf, eon=eon, eoff=eoff, vref=vref, iref=iref)
         self.gate = gate
         self.body_diode = body_diode
         self.vf_diode = vf_diode
+        self.erec = float(erec)         # reverse-recovery energy of the body diode
 
     def expand(self):
         out = [self]
         if self.body_diode:
             out.append(Diode(f"{self.name}_D", self.nodes[1], self.nodes[0],
-                             ron=self.ron, roff=self.roff, vf=self.vf_diode))
+                             ron=self.ron, roff=self.roff, vf=self.vf_diode, erec=self.erec,
+                             vref=self.vref, iref=self.iref))
         return out
 
     def set_gate(self, ctx):
@@ -460,8 +501,8 @@ class Thyristor(_Switching):
     """SCR: turns on when gated with positive anode-cathode voltage, stays on
     until its current falls to zero."""
 
-    def __init__(self, name, a, b, gate, ron=1e-3, roff=1e6, vf=0.0):
-        super().__init__(name, a, b, ron, roff, vf)
+    def __init__(self, name, a, b, gate, ron=1e-3, roff=1e6, vf=0.0, eon=0.0, eoff=0.0, vref=1.0, iref=1.0):
+        super().__init__(name, a, b, ron, roff, vf, eon=eon, eoff=eoff, vref=vref, iref=iref)
         self.gate = gate
         self._g = False
 

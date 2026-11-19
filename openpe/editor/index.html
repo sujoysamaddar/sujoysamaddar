@@ -178,6 +178,7 @@ svg .box { fill: rgba(37, 99, 235, .08); stroke: var(--accent); stroke-dasharray
       <span class="tab on" data-tab="wave">Waveforms</span>
       <span class="tab" data-tab="ac">AC / DC sweep</span>
       <span class="tab" data-tab="op">Operating point</span>
+      <span class="tab" data-tab="loss">Losses</span>
       <span class="tab" data-tab="netlist">Netlist</span>
       <span class="tab" data-tab="msg">Messages</span>
     </div>
@@ -320,8 +321,10 @@ const TYPES = {
     { pins: [P(0, -30, "out"), P(0, 30, "in")] }),
   // ---------------- semiconductors
   D: two({ cat: "Semiconductors", title: "Ideal diode", prefix: "D", svg: SYM.diode, pins: [P(-30, 0, "A"), P(30, 0, "K")],
-    props: [["vf", "Forward drop", "0"], ["plotI", "Plot current", "no", "yes|no"]], show: (p) => (parseVal(p.vf) ? `Vf=${p.vf}` : ""),
-    emit: (c, N, p) => [`${nm(c, "D")} ${N[0]} ${N[1]}` + (parseVal(p.vf) ? ` vf=${p.vf}` : "")] }),
+    props: [["vf", "Forward drop", "0"], ["plotI", "Plot current", "no", "yes|no"],
+      ["erec", "Recovery energy (J)", "0"], ["vref", "Reference voltage", "100"], ["iref", "Reference current", "10"]], show: (p) => (parseVal(p.vf) ? `Vf=${p.vf}` : ""),
+    emit: (c, N, p) => [`${nm(c, "D")} ${N[0]} ${N[1]}` + (parseVal(p.vf) ? ` vf=${p.vf}` : "") +
+      (parseVal(p.erec) ? ` erec=${p.erec} vref=${p.vref} iref=${p.iref}` : "")] }),
   DPN: two({ cat: "Semiconductors", title: "PN diode", prefix: "D", svg: SYM.dpn, pins: [P(-30, 0, "A"), P(30, 0, "K")], bbox: [-30, -15, 30, 15],
     props: [["is", "Is (A)", "1e-14"], ["n", "Emission n", "1"], ["rs", "Series R", "0"], ["plotI", "Plot current", "no", "yes|no"]], show: () => "",
     emit: (c, N, p) => [`${nm(c, "D")} ${N[0]} ${N[1]} is=${p.is} n=${p.n}` + (parseVal(p.rs) ? ` rs=${p.rs}` : "")] }),
@@ -330,8 +333,11 @@ const TYPES = {
     emit: (c, N, p) => [`${nm(c, "D")} ${N[0]} ${N[1]} is=${p.is} bv=${p.bv}` + (parseVal(p.rs) ? ` rs=${p.rs}` : "")] }),
   S: two({ cat: "Semiconductors", title: "Switch", prefix: "S", svg: SYM.sw, bbox: [-30, -20, 30, 6], label: [0, 14],
     pins: [P(-30, 0, "1"), P(30, 0, "2"), P(0, -20, "gate", "s")],
-    props: [["ron", "On resistance", "1m"], ["body_diode", "Body diode", "no", "yes|no"], ["plotI", "Plot current", "no", "yes|no"]], show: () => "",
-    emit: (c, N, p) => [`${nm(c, "S")} ${N[0]} ${N[1]} ${N[2]} ron=${p.ron}` + (p.body_diode === "yes" ? " body_diode=1" : "")] }),
+    props: [["ron", "On resistance", "1m"], ["vf", "On-state drop (V)", "0"], ["body_diode", "Body diode", "no", "yes|no"], ["plotI", "Plot current", "no", "yes|no"],
+      ["eon", "Turn-on energy (J)", "0"], ["eoff", "Turn-off energy (J)", "0"], ["vref", "Reference voltage", "100"], ["iref", "Reference current", "10"]], show: () => "",
+    emit: (c, N, p) => [`${nm(c, "S")} ${N[0]} ${N[1]} ${N[2]} ron=${p.ron}` + (parseVal(p.vf) ? ` vf=${p.vf}` : "") +
+      (p.body_diode === "yes" ? " body_diode=1" : "") +
+      (parseVal(p.eon) || parseVal(p.eoff) ? ` eon=${p.eon} eoff=${p.eoff} vref=${p.vref} iref=${p.iref}` : "")] }),
   SCR: two({ cat: "Semiconductors", title: "Thyristor", prefix: "Q", svg: SYM.scr, bbox: [-30, -10, 30, 20], label: [0, -16],
     pins: [P(-30, 0, "A"), P(30, 0, "K"), P(10, 20, "gate", "s")], props: [["plotI", "Plot current", "no", "yes|no"]], show: () => "",
     emit: (c, N) => [`${nm(c, "Q")} ${N[0]} ${N[1]} ${N[2]}`] }),
@@ -437,6 +443,7 @@ const defaultSim = () => ({
   tran: true, dt: "1u", tend: "10m", tstart: "0", init: "ic",
   op: false, ac: false, acpts: "20", acstart: "10", acstop: "1meg",
   dc: false, dcsrc: "", dcstart: "0", dcstop: "5", dcstep: "0.1", title: "schematic",
+  loss: false, lossIn: "", lossOut: "",
 });
 let doc = { comps: [], wires: [], sim: defaultSim(), nextId: 1 };
 let sel = new Set();           // selected ids ("c12", "w3")
@@ -693,6 +700,10 @@ function buildNetlist() {
     else lines.push(`.dc ${s.dcsrc} ${s.dcstart} ${s.dcstop} ${s.dcstep}`);
   }
   if (!s.tran && !s.op && !s.ac && !s.dc) errors.push("No analysis selected (open Analyses…)");
+  if (s.loss) {
+    if (!s.tran) errors.push("Loss report needs the Transient analysis");
+    else lines.push(".losses" + (String(s.lossIn).trim() ? ` in=${String(s.lossIn).trim()}` : "") + (String(s.lossOut).trim() ? ` out=${String(s.lossOut).trim()}` : ""));
+  }
   if (plots.length) lines.push(".plot " + [...new Set(plots)].join(" "));
   lines.push(".end");
   return { text: lines.join("\n") + "\n", errors, warnings, plots };
@@ -1439,6 +1450,7 @@ function renderSimSettings(el) {
     chk("dc", "DC sweep") +
     `<div class="field"><label>Source</label><select data-s="dcsrc"><option value=""></option>${srcs.map((x) => `<option ${x === s.dcsrc ? "selected" : ""}>${x}</option>`).join("")}</select></div>` +
     f("dcstart", "Start") + f("dcstop", "Stop") + f("dcstep", "Step") +
+    chk("loss", "Loss report") + f("lossIn", "Input source") + f("lossOut", "Output element") +
     `<h4>Shortcuts</h4><div class="hint">
       <div><kbd>W</kbd> wire tool · drag from a pin to wire</div><div><kbd>R</kbd>/<kbd>Shift R</kbd> rotate · <kbd>F</kbd> flip</div>
       <div><kbd>Ctrl C</kbd>/<kbd>V</kbd>/<kbd>D</kbd> copy, paste, duplicate</div><div><kbd>Alt</kbd>+drag duplicates</div>
@@ -1727,6 +1739,7 @@ async function runSim(quiet = false) {
     if (res.measures) for (const [k, v] of Object.entries(res.measures)) messages.push(["info", `${k} = ${fmtEng(v)}`]);
     if (res.warnings) for (const w of res.warnings) messages.push(["warn", w]);
     curTab = keepTab && keepTab !== "msg" && keepTab !== "netlist" ? keepTab : res.tran ? "wave" : res.ac || res.dc ? "ac" : res.op ? "op" : "msg";
+    if (res.losses && !keepTab) messages.push(["info", `Efficiency ${res.losses.efficiency != null ? (100 * res.losses.efficiency).toFixed(2) + " %" : "n/a"}, device losses ${(+res.losses.device_loss).toPrecision(4)} W (see the Losses tab)`]);
     setMsg(res.warnings && res.warnings.length ? `Simulation finished with ${res.warnings.length} warning(s) (see Messages)` : "Simulation finished");
     render();
   } catch (err) {
@@ -1756,6 +1769,17 @@ function renderTab() {
     const rows = (o, unit) => Object.entries(o).map(([k, v]) => `<tr><th>${esc(k)}</th><td>${fmtEng(v, unit)}</td></tr>`).join("");
     body.innerHTML = `<table class="op"><tr><th>Node</th><th>Voltage</th></tr>${rows(r.op.voltages, "V")}</table>` +
       `<table class="op"><tr><th>Quantity</th><th>Value</th></tr>${Object.entries(r.op.probes).map(([k, v]) => `<tr><th>${esc(k)}</th><td>${fmtEng(v, k.startsWith("I") ? "A" : "")}</td></tr>`).join("")}</table>`;
+    return;
+  }
+  if (curTab === "loss") {
+    const L = r && r.losses;
+    if (!L) { body.innerHTML = '<p class="hint">Enable “Loss report” in Analyses… (give the input source and output element for efficiency), set <b>Turn-on / Turn-off energy</b> on the switches, and run.</p>'; return; }
+    const W = (v) => (v === null || v === undefined ? "—" : (+v).toPrecision(4) + " W");
+    body.innerHTML = `<table class="op"><tr><th>Device</th><th>Type</th><th>Conduction</th><th>Switching</th><th>Total</th></tr>` +
+      L.rows.map((x) => `<tr><th>${esc(x.name)}</th><td>${esc(x.type)}</td><td>${W(x.conduction)}</td><td>${W(x.switching)}</td><td>${W(x.total)}</td></tr>`).join("") +
+      `<tr><th>All devices</th><td></td><td>${W(L.conduction_loss)}</td><td>${W(L.switching_loss)}</td><td>${W(L.device_loss)}</td></tr></table>` +
+      `<div class="hint" style="margin-top:6px">window ${(L.window[0] * 1e3).toPrecision(4)} … ${(L.window[1] * 1e3).toPrecision(4)} ms` +
+      (L.efficiency != null ? ` · input ${W(L.p_in)} (circuit) + ${W(L.switching_loss)} switching loss · output ${W(L.p_out)} · other ${W(L.other_loss)} · <b>efficiency ${(100 * L.efficiency).toFixed(2)} %</b>` : " · set an input source and output element for efficiency") + `</div>`;
     return;
   }
   if (curTab === "wave") {

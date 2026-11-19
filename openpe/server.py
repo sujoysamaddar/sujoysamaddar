@@ -113,8 +113,15 @@ def simulate_netlist(text, max_points=4000):
         stats = dict(res.meta["stats"])
         out["tran"] = {"t": _clean(t), "signals": {n: _clean(v) for n, v in sig.items()},
                        "stats": {k: (round(v, 4) if isinstance(v, float) else v) for k, v in stats.items()}}
+        if nl.losses is not None:
+            try:
+                lres = res.last(nl.window) if nl.window else res.window(res.t[-1] * 0.5)   # settled half
+                out["losses"] = lres.loss_report(nl.losses["devices"] or None, nl.losses["input"] or None,
+                                                 nl.losses["output"] or None).to_dict()
+            except Exception as exc:                  # a wrong name must not lose the waveforms
+                warnings.append(f".losses: {exc}")
         if nl.measures:
-            from .__main__ import _measure
+            from .measures import measure as _measure
             mres = res.last(nl.window) if nl.window else res
             out["measures"] = {}
             for m in nl.measures:                # one bad .measure must not lose the results

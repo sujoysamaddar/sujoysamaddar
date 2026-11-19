@@ -19,22 +19,25 @@ except ImportError as _exc:
     raise ImportError("OpenPE needs numpy. Install the requirements with:  pip install -r requirements.txt  "
                       "(PyCharm: open requirements.txt and click 'Install requirements').") from _exc
 
-from . import control, devices, elements, waveforms
+from . import changes, control, devices, elements, eseries, measures, waveforms
 from .analysis import (MonteCarloResult, ac_sweep, format_table, monte_carlo, parameter_sweep, plot_bode,
                        tf_response)
 from .circuit import Circuit
 from .control import (PI, PID, PLL, PWM, ABCtoDQ, Abs, Comparator, Constant, CurrentSensor, DeadTime,
-                      Divide, DQtoABC, Function, Gain, Integrator, Limiter, Logic, LowPass, MovingAverage,
+                      Divide, DQtoABC, Function, Gain, Integrator, Limiter, LookupTable, Logic, LowPass, MovingAverage,
                       Product, ProbeSensor, PythonBlock, Ramp, RateLimiter, RMSMeter, SampleHold, Sawtooth,
-                      SineWave, SquareWave, StepSignal, Sum, TransferFunction, Triangle, UnitDelay,
+                      SineWave, SquareWave, StepSignal, Sum, SVPWM, TransferFunction, Triangle, UnitDelay,
                       VoltageSensor)
-from .devices import BJT, CCCS, CCVS, MOSFET, VCCS, VCVS, OpAmp, PNDiode, Zener, thermal_voltage
+from .devices import (BJT, CCCS, CCVS, MOSFET, VCCS, VCVS, OpAmp, PNDiode, SaturableInductor, Zener,
+                      thermal_voltage)
 from .elements import (Capacitor, CoupledInductors, CurrentSource, DCMotor, Diode, IdealTransformer,
                        Inductor, Resistor, Switch, ThreePhaseSource, Thyristor, Transformer, VoltageSource)
 from .netlist import load as load_netlist
 from .netlist import parse as parse_netlist
+from .losses import LossReport, junction_temperature, loss_report
 from .results import Results
 from .simulator import ACResult, OPResult, Simulator
+from .tuning import Solution, solve_for
 from .units import parse_value
 from .waveforms import DC, PWL, Sine, Square, Step
 

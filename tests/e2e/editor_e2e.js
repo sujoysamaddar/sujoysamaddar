@@ -241,6 +241,29 @@ const near = (a, b, tol) => Math.abs(a - b) <= tol;
   const kinds = await page.evaluate(() => { const n = OpenPE.computeNets(); return [...n.kinds.values()]; });
   assert(kinds.includes("s") && kinds.includes("p"), "signal and power nets distinguished");
 
+  // ---- 5b. loss report: switch energies, analyses panel, Losses tab
+  await page.evaluate(() => OpenPE.loadDoc(OpenPE.EXAMPLES["Buck converter (PWM)"]()));
+  await page.evaluate(() => {
+    const sw = OpenPE.doc.comps.find((c) => c.type === "S"); sw.props.eon = "50u"; sw.props.eoff = "80u"; sw.props.vref = "48"; sw.props.iref = "4";
+    const d = OpenPE.doc.comps.find((c) => c.type === "D"); d.props.erec = "10u"; d.props.vref = "48"; d.props.iref = "4";
+    OpenPE.doc.sim.loss = true; OpenPE.doc.sim.lossIn = "V1"; OpenPE.doc.sim.lossOut = "R1"; OpenPE.doc.sim.tend = "3m";
+  });
+  const lnet = await page.evaluate(() => OpenPE.buildNetlist());
+  assert(!lnet.errors.length && lnet.text.includes(".losses in=V1 out=R1") && lnet.text.includes("eon=50u eoff=80u vref=48 iref=4") &&
+         lnet.text.includes("erec=10u"), "loss netlist\n" + lnet.text + lnet.errors.join(";"));
+  await page.evaluate(() => OpenPE.runSim());
+  await page.waitForFunction(() => OpenPE.results && OpenPE.results.losses);
+  const L = await page.evaluate(() => OpenPE.results.losses);
+  assert(L.rows.map((r) => r.name).join() === "S1,D1" && L.rows[0].switching > 0.5 && L.efficiency > 0.5 && L.efficiency < 1, "losses " + JSON.stringify(L));
+  await page.locator('.tab[data-tab="loss"]').click();
+  const ltxt = await page.locator("#tabBody").innerText();
+  assert(ltxt.includes("S1") && ltxt.includes("efficiency"), "Losses tab shows the table: " + ltxt);
+  await page.evaluate(() => { OpenPE.doc.sim.tran = false; });                  // loss report needs a transient
+  const lbad = await page.evaluate(() => OpenPE.buildNetlist());
+  assert(lbad.errors.some((m) => m.includes("Loss report needs")), "loss without transient is reported");
+  await page.evaluate(() => { OpenPE.doc.sim.tran = true; OpenPE.doc.sim.loss = false; });   // back to a plain transient run
+  console.log("loss report ok");
+
   // ---- 6. server warnings (e.g. SPICE "1M" = milli) appear in Messages
   await page.evaluate(() => { const r = OpenPE.doc.comps.find((c) => c.type === "R"); r.props.value = "1M"; });
   await page.evaluate(() => OpenPE.runSim());

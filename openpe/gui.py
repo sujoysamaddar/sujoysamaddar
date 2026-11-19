@@ -173,6 +173,8 @@ class Studio:
         t.add_separator()
         t.add_command(label="Snap R / C / L values to a standard series...", command=self.snap_dialog)
         t.add_command(label="Schedule a value change during the simulation...", command=self.schedule_change)
+        t.add_command(label="Solve the selected parameter for a target value...", command=self.solve_dialog)
+        t.add_command(label="Step-response metrics of the selected signal...", command=self.step_metrics)
         m.add_cascade(label="Tools", menu=t)
         h = tk.Menu(m, tearoff=False)
         h.add_command(label="Netlist syntax", command=self.show_syntax)
@@ -239,6 +241,7 @@ class Studio:
         self.fig_ac, self.canvas_ac = self._figure_tab("AC analysis")
         self.fig_dc, self.canvas_dc = self._figure_tab("DC sweep")
         self._build_op_tab()
+        self._build_loss_tab()
         self._build_image_tab()
         self._build_log_tab()
 
@@ -267,6 +270,7 @@ class Studio:
         self.sig_list.bind("<<ListboxSelect>>", lambda e: self.plot_waves())
         self.overlay = tk.BooleanVar(value=False)
         ttk.Checkbutton(side, text="Overlay in one plot", variable=self.overlay, command=self.plot_waves).pack(anchor="w", pady=4)
+        ttk.Button(side, text="Step metrics...", command=self.step_metrics).pack(anchor="w", pady=(0, 4))
         self.measure_var = tk.StringVar(value="")
         ttk.Label(side, textvariable=self.measure_var, foreground="#15803d", wraplength=170, justify="left").pack(anchor="w")
         plot = ttk.Frame(tab)
@@ -282,8 +286,23 @@ class Studio:
         self.op_tree.column("value", width=160, anchor="e")
         self.op_tree.pack(fill="both", expand=True)
 
-    def _build_image_tab(self):
+    def _build_loss_tab(self):
         tab = ttk.Frame(self.nb)
+        self.nb.add(tab, text="Losses")
+        cols = ("type", "conduction", "switching", "total")
+        self.loss_tree = ttk.Treeview(tab, columns=cols, show="tree headings", height=8)
+        self.loss_tree.heading("#0", text="Device")
+        for c in cols:
+            self.loss_tree.heading(c, text=c if c == "type" else f"{c} (W)")
+            self.loss_tree.column(c, width=90 if c == "type" else 110, anchor="e")
+        self.loss_tree.column("#0", width=160)
+        self.loss_tree.pack(fill="both", expand=True)
+        self.loss_summary = tk.StringVar(value="Add a  .losses  line to the netlist (e.g.  .losses in=Vin out=Rload) "
+                                               "and give switches eon= / eoff= energies to get a loss report.")
+        ttk.Label(tab, textvariable=self.loss_summary, padding=6, wraplength=700, justify="left").pack(fill="x")
+
+    def _build_image_tab(self):
+        tab = self.tab_images = ttk.Frame(self.nb)
         self.nb.add(tab, text="Script plots")
         side = ttk.Frame(tab, padding=4)
         side.pack(side="left", fill="y")
@@ -470,6 +489,13 @@ class Studio:
                     self.log_write(msg[1] + "\n", "err")
                     self.nb.select(self.nb.tabs()[-1])
                     self._maybe_rerun()
+                elif kind == "solve":
+                    self._show_solution(msg[1])
+                elif kind == "solveerr":
+                    self._set_busy(False, "Solve failed - see Log")
+                    self.log_write(msg[1] + "\n", "err")
+                    self.nb.select(self.nb.tabs()[-1])
+                    self._maybe_rerun()
                 elif kind == "sweepprog":
                     self.status.set(f"Sweep: run {msg[1]} of {msg[2]} ({msg[3]})...")
                 elif kind == "sweep":
@@ -531,9 +557,29 @@ class Studio:
             for k, val in res["op"]["probes"].items():
                 unit = "A" if k.startswith(("I(", "Ib(")) else "V" if k.startswith(("Vbe", "Vce", "Vgs", "Vds", "Vd(")) else ""
                 self.op_tree.insert(p, "end", text=k, values=(_fmt(val, unit),))
+        self._show_losses(res.get("losses"))
         tabs = self.nb.tabs()
         target = 0 if "tran" in res else 1 if "ac" in res else 2 if "dc" in res else 3
         self.nb.select(tabs[target])
+
+    def _show_losses(self, rep):
+        self.loss_tree.delete(*self.loss_tree.get_children())
+        if not rep:
+            self.loss_summary.set("Add a  .losses  line to the netlist (e.g.  .losses in=Vin out=Rload) "
+                                  "and give switches eon= / eoff= energies to get a loss report.")
+            return
+        for r in rep["rows"]:
+            self.loss_tree.insert("", "end", text=r["name"],
+                                  values=(r["type"], f"{r['conduction']:.4g}", f"{r['switching']:.4g}", f"{r['total']:.4g}"))
+        self.loss_tree.insert("", "end", text="all devices",
+                              values=("", f"{rep['conduction_loss']:.4g}", f"{rep['switching_loss']:.4g}", f"{rep['device_loss']:.4g}"))
+        txt = f"window {rep['window'][0] * 1e3:.4g} .. {rep['window'][1] * 1e3:.4g} ms.  "
+        if rep.get("efficiency") is not None:
+            txt += (f"Input {rep['p_in']:.4g} W (circuit) + {rep['switching_loss']:.4g} W switching loss, output {rep['p_out']:.4g} W, "
+                    f"other losses {rep['other_loss']:.3g} W.  Efficiency {100 * rep['efficiency']:.2f} %")
+        else:
+            txt += "Add in=<source> out=<element> to the .losses line for efficiency."
+        self.loss_summary.set(txt)
 
     def plot_waves(self):
         fig = self.fig_w
@@ -929,6 +975,95 @@ class Studio:
         if names and self.sw_signal.get() not in names:
             self.sw_signal.set(names[0])
 
+    def step_metrics(self, signal=None, t_step=None):
+        """Rise time, overshoot and settling time of a waveform after a step."""
+        import numpy as np
+        from .results import Results
+        from .units import parse_value
+        res = self.result
+        if not res or "tran" not in res:
+            messagebox.showinfo("Step metrics", "Run a transient simulation first.")
+            return None
+        names = [self.sig_list.get(i) for i in self.sig_list.curselection()]
+        name = signal or (names[0] if names else None)
+        if not name:
+            messagebox.showinfo("Step metrics", "Select a signal in the Waveforms list first.")
+            return None
+        if t_step is None:
+            ans = simpledialog.askstring("Step metrics", f"Time of the step in {name} (seconds, e.g. 0 or 4m):",
+                                         initialvalue="0", parent=self.root)
+            if ans is None:
+                return None
+            try:
+                t_step = parse_value(ans)
+            except ValueError:
+                messagebox.showerror("Step metrics", f"'{ans}' is not a time")
+                return None
+        data = np.array([float("nan") if v is None else v for v in res["tran"]["signals"][name]])
+        try:
+            info = Results(np.array(res["tran"]["t"]), {name: data}).step_info(name, t_step=t_step)
+        except ValueError as exc:
+            messagebox.showerror("Step metrics", str(exc))
+            return None
+        txt = (f"{name}: {_fmt(info['initial'])} -> {_fmt(info['final'])}   rise {_fmt(info['rise_time'], 's')}, "
+               f"overshoot {info['overshoot_pct']:.2f} %, settling {_fmt(info['settling_time'], 's')}")
+        self.log_write(f"[step metrics] {txt}\n", "ok")
+        self.measure_var.set((self.measure_var.get() + "\n" if self.measure_var.get() else "") +
+                             f"rise {_fmt(info['rise_time'], 's')}\novershoot {info['overshoot_pct']:.2f} %\n"
+                             f"settling {_fmt(info['settling_time'], 's')}")
+        self.status.set(txt)
+        return info
+
+    def solve_dialog(self, spec=None):
+        """Find the value of the selected parameter that makes a measurement reach a target."""
+        from .tuning import solve_for
+        from .units import parse_value
+        p = self._current_param()
+        if not p:
+            messagebox.showinfo("Solve", "Select a parameter in the Design parameters list first.")
+            return
+        if self.sim_busy:
+            return
+        if spec is None:
+            spec = simpledialog.askstring(
+                "Solve for a target value",
+                f"Find the value of {p.label} for which\n   measurement = value\n"
+                f"(examples:  overshoot V(b) = 20     max V(out) = 12     mean I(L1) = 3)\n"
+                f"Searched between {self.sw_from.get()} and {self.sw_to.get()} (the Parameter sweep boxes).",
+                parent=self.root)
+        if not spec:
+            return
+        try:
+            meas, val = spec.rsplit("=", 1)
+            target = parse_value(val.strip())
+            lo, hi = parse_value(self.sw_from.get()), parse_value(self.sw_to.get())
+        except ValueError:
+            messagebox.showerror("Solve", "Write it as  measurement = value,  e.g.  overshoot V(b) = 20")
+            return
+        base, log = self.text.get("1.0", "end-1c"), self.sw_log.get()
+        self._set_busy(True, f"Solving {p.label} for {meas.strip()} = {target:g} ...")
+
+        def work():
+            try:
+                self.q.put(("solve", solve_for(base, p.label, meas.strip(), target, lo, hi, log=log)))
+            except Exception as exc:
+                self.q.put(("solveerr", f"Solve failed: {type(exc).__name__}: {exc}"))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _show_solution(self, sol):
+        from .designparams import format_value
+        self._set_busy(False, str(sol))
+        self.log_write(f"\n=== solve {sol.label} for {sol.spec} = {sol.target:g} ===\n", "ok")
+        for k, (v, m) in enumerate(sol.history, 1):
+            self.log_write(f"  run {k:>2}: {sol.label} = {v:<14.8g} {sol.spec} = {m:.6g}\n")
+        self.log_write(str(sol) + "\n", "ok" if sol.converged else "err")
+        if sol.converged:
+            self.select_param(sol.label)
+            self.p_value.set(format_value(sol.value, 6))
+            self.apply_param()                       # writes the value into the netlist (and re-runs with Auto-run)
+        self._maybe_rerun()
+
     def run_sweep(self):
         from .designparams import format_value, set_param, sweep_values
         p = self._current_param()
@@ -1081,7 +1216,7 @@ class Studio:
             for p in new:
                 self.img_list.insert("end", os.path.basename(p))
             self.img_list.selection_set(0)
-            self.nb.select(self.nb.tabs()[4])
+            self.nb.select(self.tab_images)
             self._after(50, self._show_image)
 
     def _show_image(self):

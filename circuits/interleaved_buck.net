@@ -1,0 +1,26 @@
+* Two-phase interleaved buck converter built from ONE .subckt used twice.
+* The two carriers are 180 degrees apart, so the inductor ripple currents
+* cancel at the output at D = 0.5.
+.title Interleaved buck (2 phases)
+.param vin=24 fsw=50k duty=0.5
+
+.subckt phase in out duty ph=0
+S1 in sw g ron=20m eon=20u eoff=30u vref=24 iref=10
+D1 0 sw vf=0.5 ron=10m
+L1 sw out 50u
+B1 PWM g duty freq={fsw} phase={ph}
+.ends
+
+Vin in 0 DC {vin}
+B1 CONST d value={duty}
+X1 in out d phase ph=0
+X2 in out d phase ph=180
+C1 out 0 100u
+Rload out 0 2.4
+.tran 0.1u 4m
+.plot V(out) I(X1.L1),I(X2.L1)
+.window 0.5m
+.measure mean V(out)
+.measure pp V(out)
+.losses in=Vin out=Rload
+.end

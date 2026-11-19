@@ -521,3 +521,82 @@ class OpAmp(Element):
         if self.rout:
             prims.append(Resistor(f"{n}_ro", drv, out, self.rout))
         return prims
+
+
+# ---------------------------------------------------------------------------
+# Magnetics: saturable inductor
+# ---------------------------------------------------------------------------
+class SaturableInductor(Element):
+    """Inductor whose inductance falls as the current approaches saturation.
+
+    Flux linkage  lambda(i) = lsat*i + (l0 - lsat)*isat*tanh(i/isat), so the
+    small-signal inductance is L(i) = lsat + (l0 - lsat)*sech^2(i/isat): ``l0``
+    near zero current, falling smoothly towards ``lsat`` well above ``isat``.
+    The terminal voltage is v = d(lambda)/dt, integrated with the same
+    trapezoidal / backward-Euler rules as a linear inductor, so flux is
+    conserved exactly.
+
+    Probes: I(name), L(name) (present inductance), flux(name) (Wb-turns).
+    """
+    n_branch = 1
+    is_nonlinear = True
+
+    def __init__(self, name, a, b, l0, isat, lsat=None, ic=0.0):
+        super().__init__(name, a, b)
+        self.l0, self.isat, self.ic = float(l0), float(isat), float(ic)
+        self.lsat = 0.1 * self.l0 if lsat is None else float(lsat)
+        if not (self.l0 > 0 and self.isat > 0):
+            raise ValueError(f"{name}: l0 and isat must be > 0")
+        if not (0 < self.lsat <= self.l0):
+            raise ValueError(f"{name}: lsat must satisfy 0 < lsat <= l0")
+        self.limited = False
+
+    def flux(self, i):
+        return self.lsat * i + (self.l0 - self.lsat) * self.isat * math.tanh(i / self.isat)
+
+    def inductance(self, i):
+        t = math.tanh(i / self.isat)
+        return self.lsat + (self.l0 - self.lsat) * (1.0 - t * t)
+
+    def init(self, ctx):
+        self.i_prev, self.v_prev = self.ic, 0.0
+        self.lam_prev = self.flux(self.ic)
+        self._i = self.ic
+
+    def stamp_A(self, A, ctx):
+        a, b = self.idx
+        k = self.br[0]
+        if a >= 0:
+            A[a, k] += 1
+            A[k, a] += 1
+        if b >= 0:
+            A[b, k] -= 1
+            A[k, b] -= 1
+
+    def stamp_nl(self, A, rhs, x, ctx):
+        if ctx.method == "dc":                 # v = 0: the inductor is a short circuit
+            return
+        k = self.br[0]
+        f = (2.0 if ctx.method == "trap" else 1.0) / ctx.dt
+        i0 = x[k]
+        ld, lam0 = self.inductance(i0), self.flux(i0)
+        # v = f*(lambda(i) - lambda_prev) - [v_prev], linearised about i0
+        A[k, k] -= f * ld
+        rhs[k] += -f * self.lam_prev - (self.v_prev if ctx.method == "trap" else 0.0) + f * (lam0 - ld * i0)
+
+    def stamp_ac(self, Y, rhs, w, ctx):
+        self.stamp_A(Y, ctx)
+        Y[self.br[0], self.br[0]] -= 1j * w * self.inductance(ctx.x[self.br[0]])
+
+    def update(self, x, ctx):
+        i = x[self.br[0]]
+        self._i, self.i_prev = i, i
+        self.v_prev = self.voltage(x)
+        self.lam_prev = self.flux(i)
+
+    def current(self, x):
+        return self._i
+
+    def probes(self, x):
+        return {f"I({self.name})": self._i, f"L({self.name})": self.inductance(self._i),
+                f"flux({self.name})": self.lam_prev}

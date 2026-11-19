@@ -123,6 +123,8 @@ class Circuit:
                     setattr(b, attr, rn(getattr(b, attr)))
             if hasattr(b, "element"):
                 b.element = f"{prefix}.{b.element}"
+            if getattr(b, "netname", None):
+                b.netname = f"{prefix}.{b.netname}"
             self.add(b)
 
     # ------------------------------------------------------------------

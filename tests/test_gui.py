@@ -216,3 +216,62 @@ def test_scheduled_change_is_inserted_validated_and_marked_on_the_plot(app, monk
     app.run_netlist()
     _pump(app, lambda: not app.busy)
     assert len(app.result["changes"]) == n
+
+
+LOSS_NET = """V1 in 0 DC 100
+S1 in out g ron=0.1 eon=100u eoff=100u vref=100 iref=10
+R1 out 0 9.9
+B1 CONST d value=0.4
+B2 PWM g d freq=10k
+.tran 0.5u 4m
+.window 2m
+.losses in=V1 out=R1
+.end
+"""
+
+
+def test_losses_tab_shows_the_report(app):
+    app.set_text(LOSS_NET)
+    app.autorun.set(False)
+    app.run_netlist()
+    _pump(app, lambda: app.result is not None and not app.busy)
+    rows = [app.loss_tree.item(i) for i in app.loss_tree.get_children()]
+    assert rows[0]["text"] == "S1" and rows[0]["values"][0] == "Switch"
+    assert float(rows[0]["values"][2]) == pytest.approx(2.0, rel=0.02)          # 200 uJ x 10 kHz switching loss
+    assert rows[-1]["text"] == "all devices"
+    assert "Efficiency" in app.loss_summary.get()
+    app.set_text("V1 a 0 DC 1\nR1 a 0 1\n.tran 1u 10u\n.end\n")                 # no .losses -> hint
+    app.result = None
+    app.run_netlist()
+    _pump(app, lambda: app.result is not None and not app.busy)
+    assert not app.loss_tree.get_children() and ".losses" in app.loss_summary.get()
+
+
+def test_step_metrics_and_solve_for_target(app, monkeypatch):
+    shown = []
+    monkeypatch.setattr("openpe.gui.messagebox.showerror", lambda title, msg, **kw: shown.append(msg))
+    monkeypatch.setattr("openpe.gui.messagebox.showinfo", lambda title, msg, **kw: shown.append(msg))
+    assert app.step_metrics("V(b)") is None and "Run a transient" in shown[-1]        # nothing simulated yet
+    app.autorun.set(False)
+    app.run_netlist()
+    _pump(app, lambda: app.result is not None and not app.busy)
+    info = app.step_metrics("V(b)", t_step=0.0)
+    assert info["overshoot_pct"] == pytest.approx(44.43, abs=0.1)
+    assert "overshoot 44." in app.measure_var.get() and "[step metrics]" in app.log.get("1.0", "end")
+    app.select_param("R1.value")
+    app.sw_from.set("2")
+    app.sw_to.set("50")
+    app.solve_dialog("overshoot V(b) = 20")
+    assert app.sim_busy
+    _pump(app, lambda: not app.sim_busy, timeout=120)
+    txt = app.text.get("1.0", "end")
+    assert "R1 in a 9.1" in txt                                                      # solved value written into the netlist
+    assert "=== solve R1.value for overshoot V(b) = 20 ===" in app.log.get("1.0", "end")
+    assert "R1.value = 9.1" in app.log.get("1.0", "end")
+    app.solve_dialog("overshoot V(b) = 20 =")                                         # malformed: rejected, nothing starts
+    assert not app.sim_busy and "measurement = value" in shown[-1]
+    app.sw_from.set("2")
+    app.sw_to.set("3")
+    app.solve_dialog("overshoot V(b) = 20")                                          # not bracketed: reported in the Log
+    _pump(app, lambda: not app.sim_busy, timeout=120)
+    assert "not between the measurements" in app.log.get("1.0", "end")

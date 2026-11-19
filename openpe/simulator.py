@@ -585,6 +585,10 @@ class Simulator:
             "element_nodes": {e.name: e.nodes for e in self.elements},
             "stats": dict(self.stats),
             "changes": [c.to_dict() for c in self.circuit.changes],
+            "element_types": {e.name: type(e).__name__ for e in self.elements},
+            "storage": [{"name": e.name, "kind": "C" if isinstance(e, el.Capacitor) else "L",
+                         "value": e.c if isinstance(e, el.Capacitor) else e.l}
+                        for e in self.elements if isinstance(e, (el.Capacitor, el.Inductor))],
         }
         return Results(np.array(rec_t), data, meta)
 

@@ -178,6 +178,96 @@ the whole circuit) to the chosen E-series.
 
 <p align="center"><img src="docs/editor_tuner.png" width="80%" alt="Quick tuner in the schematic editor, with a value change marked on the waveform"></p>
 
+## Loss, thermal and design tools
+
+**Losses and efficiency.** Give switching devices data-sheet style loss parameters and ask for a
+report:
+
+```text
+S1 in sw g ron=15m vf=0 eon=25u eoff=35u vref=48 iref=10      ; MOSFET: energies measured at 48 V / 10 A
+D1 0 sw vf=0.45 ron=8m erec=2u vref=48 iref=10                 ; Schottky: reverse-recovery energy
+.losses in=Vin out=Rload                                        ; report after the run
+```
+
+```python
+rep = res.last(0.4e-3).loss_report(output="Rload", input="Vin")
+print(rep)                       # per device: conduction W, switching W, total, and efficiency
+rep.efficiency, rep.switching_loss, rep.to_dict()
+```
+
+* **Conduction loss:** the mean of v·i over the window, including `ron` and the on-state drop `vf`.
+* **Switching loss:** each turn-on, turn-off or recovery adds `E · (V / vref) · (I / iref)`, where V and I are
+  the actual blocking voltage and current at that commutation. The running total is the probe `Esw(S1)`.
+* **Efficiency:** the output power divided by (input power − energy stored in C/L + switching loss). The
+  stored-energy term keeps the figure correct even when the window is not a steady-state period.
+  Switching loss is a post-processed estimate that the simulated circuit does not draw, so it is added to
+  the input.
+* **Sampling error:** "other" in the report includes a sampling error that halves when the time step
+  halves. Use at least 200 steps per switching period for sub-percent figures.
+* **Junction temperature:** `res.junction_temperature("S1", stages=[(0.8, 0.002), (1.2, 0.05)], ta=40)`
+  gives Tj(t) for a Foster network of (K/W, J/K) stages, from the device's conduction power plus its
+  switching energy.
+
+OpenPE Studio shows the report in a **Losses** tab, and the browser editor in a **Losses** tab fed by the
+Analyses panel's *Loss report* option (switches and diodes have energy fields).
+
+<p align="center"><img src="docs/studio_losses.png" width="80%" alt="Losses tab of OpenPE Studio for a two-phase interleaved buck"></p>
+
+**Step-response metrics.** `res.step_info("V(out)", t_step=4e-3)` returns the rise time (10–90 %),
+delay, peak, overshoot, peak time and 2 % settling time of a step response, rising or falling.
+The same numbers are available as `.measure` lines (`rise`, `delay`, `overshoot`, `peaktime`, `settle`,
+`final`, `power`, `eff`, plus `mean`, `rms`, `min`, `max`, `pp`, `thd`):
+
+```text
+.measure overshoot V(out) 4m       ; overshoot (%) of the step that happens at 4 ms
+```
+
+**Design by target (solving).** Find the parameter value that makes a measurement reach a number:
+
+```bash
+python -m openpe run circuits/rlc_step.net --solve R1.value=2:50 --target "overshoot V(b)=20" --save tuned.net
+# R1.value = 9.11908 -> overshoot V(b) = 19.9992 (target 20, 10 runs)     analytic: 9.12 ohm
+```
+
+```python
+from openpe import solve_for
+sol = solve_for(open("circuits/rlc_step.net").read(), "R1.value", "overshoot V(b)", 20, lo=2, hi=50)
+sol.value, sol.measure, sol.text
+```
+
+The solver is the Illinois method (bisection-safe, usually 8–12 runs); add `log=True` / `:log` for ranges
+spanning decades. If the target isn't between the measurements at the ends of the range, the error shows both.
+OpenPE Studio has **Tools → Solve the selected parameter for a target value** (it searches between the Parameter
+sweep *From* and *To* boxes and writes the answer into the netlist) and a **Step metrics** button for the
+selected waveform.
+
+**Sub-circuits.** Define a block once and reuse it, with parameters and nesting:
+
+```text
+.subckt phase in out duty ph=0            ; ports, then parameters with defaults
+S1 in sw g ron=20m
+D1 0 sw vf=0.5
+L1 sw out 50u
+B1 PWM g duty freq={fsw} phase={ph}
+.ends
+X1 in out d phase ph=0                    ; instances: X<name> nodes... SUBCKT [param=value]
+X2 in out d phase ph=180                  ; elements become X1.S1, X2.L1 ... (use them in .plot / .measure)
+```
+
+`circuits/interleaved_buck.net` builds a two-phase interleaved buck this way: at D = 0.5 the ripple
+currents cancel and the output ripple falls from 133 mV to 4.4 mV (example 16).
+
+**More parts.**
+
+* `SaturableInductor(name, a, b, l0, isat, lsat)`, or `L1 a b 1m isat=2 lsat=100u` in a netlist. Flux linkage is
+  λ(i) = lsat·i + (l0 − lsat)·isat·tanh(i/isat). It conserves flux exactly, is a short at DC, has the correct
+  small-signal inductance in AC analysis, and records `L(name)` and `flux(name)`.
+* `LookupTable(out, in, xs, ys)`, or `B2 LOOKUP y x xs=0,2,4 ys=0,5,1`. It is piecewise linear and holds its end
+  values (or extrapolates with `extrapolate=1`).
+* `SVPWM(da, db, dc, va, vb, vc, vdc)`, or `B4 SVPWM da db dc va vb vc vdc=400`. It performs min-max
+  common-mode injection, so a three-phase inverter reaches Vdc/√3 per phase, 15 % more than sine PWM
+  (example 17).
+
 ## Drag-and-drop schematic editor
 
 ```bash
@@ -283,7 +373,7 @@ local server, which binds to `127.0.0.1` and only parses netlists.
 
 ```bash
 pip install -e ".[dev]"     # numpy + matplotlib + pytest
-pytest -q                   # 130 tests, ~35 s (the GUI and browser tests need Tkinter / Node.js + Playwright, otherwise they are skipped)
+pytest -q                   # 160 tests, ~55 s (the GUI and browser tests need Tkinter / Node.js + Playwright, otherwise they are skipped)
 ```
 
 ## Examples
@@ -306,6 +396,9 @@ Every script in `examples/` is self-contained and writes plots to
 | `11_semiconductor_curves.py` | Curve tracer: diode/Zener I-V, BJT and NMOS output characteristics, CMOS inverter VTC | Inverter threshold 2.496 V (ideal 2.5 V) |
 | `12_monte_carlo_tolerance.py` | Monte Carlo of filter cut-off with 1 %/5 % parts, yield against a ±3 % spec | Yield 91.7 % (5 % caps) vs 100 % (1 % caps) |
 | `13_linear_power_supply.py` | Transformer + bridge of real diodes + reservoir capacitor + Zener/BJT series regulator | 9.08 V at 0.5 A, 34 dB ripple rejection, 21 mV/V line regulation |
+| `15_losses_thermal.py` | Buck converter with MOSFET/diode loss energies: per-device loss report, efficiency vs switching frequency, junction temperature (Foster network) | Efficiency 93.6 % at 25 kHz → 83.5 % at 300 kHz |
+| `16_interleaved_buck_subckt.py` | Two-phase interleaved buck from one `.subckt` used twice; loss report across both instances | Output ripple 133 mV → 4.4 mV; summed inductor ripple 0.01 A |
+| `17_svpwm_and_saturation.py` | SVPWM three-phase inverter beyond the sine-PWM limit; buck with a saturating inductor under an overload step | 220.0 V fundamental at 0.55 Vdc, THD 0.14 %; ripple 2.3 → 8.5 A when the inductor saturates |
 | `14_value_changes.py` | Standard-value design (ideal vs E12/E24/E96 resistor), a buck converter with load and reference changes during the run, and value overrides from code | E24 puts the 1 kHz cut-off at 995 Hz (−0.5 %), E12 at 1061 Hz (+6 %) |
 
 Netlist examples are in `circuits/`:
@@ -316,6 +409,7 @@ python -m openpe run circuits/three_phase_rectifier.net
 python -m openpe run circuits/ce_amplifier.net --plot ce.png    # .op + .ac + .tran
 python -m openpe run circuits/opamp_sallen_key.net              # .ac
 python -m openpe run circuits/diode_iv.net --plot iv.png        # .dc
+python -m openpe run circuits/interleaved_buck.net               # .subckt + .losses
 python -m openpe blocks          # list control block types
 ```
 
@@ -340,6 +434,7 @@ S1    in  sw  gate                ; switch: n1 n2 gate_signal [ron= roff= body_d
 D1    0   sw                      ; diode: anode cathode [vf= ron= roff=]
 Q1    a   k   g1                  ; thyristor
 L1    sw  out 100u  ic=0
+L2    a   b   1m    isat=2 lsat=100u   ; saturable inductor
 C1    out 0   220u  ic=0
 T1    p1 p2 s1 s2 2 lm=200u llk=2u    ; transformer, n = Np/Ns
 K1    a b c d 1m 4m 0.99              ; coupled inductors L1 L2 k
@@ -364,6 +459,8 @@ B6 TF       y u num=1 den=1e-3,1
 .dc V1 0 5 0.01                    ; DC sweep: source start stop step
 .ac dec 20 10 1meg                 ; AC analysis: dec|oct|lin points fstart fstop
 .window 1m                         ; measurements over the last 1 ms
+.subckt NAME ports... [p=default]  ...  .ends   ; sub-circuit;  X<name> nodes... NAME [p=value]
+.losses in=Vin out=Rload           ; loss and efficiency report (devices=S1,D1 to restrict)
 .change 4m Rload 3                 ; change a value at a time: .change time target value
 .change 0.3 M1 tload=4             ;   or  key=value
 .plot V(out),vref I(L1)            ; comma = overlay in one panel
@@ -420,8 +517,9 @@ Newton iterations, subdivided steps and CPU time.
 * Backward-Euler damping at switching instants adds a small numerical loss
   in reactive elements. It is proportional to `dt` and only visible in
   precise efficiency studies; use a smaller `dt` for those.
-* Switches are ideal (no switching-loss or thermal models). Conduction
-  loss comes from `ron`/`vf`.
+* Switches are ideal: conduction loss comes from `ron`/`vf`, and switching loss is a post-processed estimate
+  from the `eon`/`eoff`/`erec` energies (it is not fed back into the circuit). Thermal analysis is a one-way
+  Foster model driven by the device power, with no thermal feedback into `ron`.
 * Only DC machines are included. AC machines can be built from the
   provided dq transforms, sources and `PythonBlock`.
 * Semiconductor models are textbook-level: Shockley, Ebers-Moll and
@@ -443,6 +541,9 @@ openpe/
   simulator.py   MNA solver: transient (matrix caching, switch iteration, Newton), .op, .dc, .ac
   results.py     waveform analysis, plots, CSV
   analysis.py    parameter sweep, injection AC sweep, Monte Carlo, Bode helpers
+  losses.py      loss report (conduction + switching), efficiency, junction temperature
+  measures.py    named measurements (.measure): statistics, thd, step-response metrics, power, efficiency
+  tuning.py      solve_for(): find the parameter value that reaches a measured target
   designparams.py  find / change / sweep the numeric values of a netlist (design-time parameters), overrides, E-series snapping
   changes.py     value changes: Circuit.at / set_value and the .change directive
   eseries.py     standard component values (E6 ... E96): nearest / step

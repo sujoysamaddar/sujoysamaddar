@@ -87,6 +87,50 @@ class Results:
     def final(self, name):
         return float(self[name][-1])
 
+    def step_info(self, name, t_step=None, final=None, band=0.02):
+        """Step-response metrics of a signal after a step at ``t_step``
+        (default: the start of the record).
+
+        Returns a dict with ``initial`` (value just before the step), ``final``
+        (default: mean of the last 5 % of the record), ``rise_time`` (10-90 %),
+        ``delay_time`` (to 50 %), ``peak``, ``peak_time``, ``overshoot_pct`` (of
+        the step size, 0 if none) and ``settling_time`` (until the signal stays
+        within ``band`` of the final value; nan if it never settles).  Times are
+        measured from ``t_step``.  Works for falling steps too."""
+        t, y = self.t, np.asarray(self[name], float)
+        t0 = float(t[0]) if t_step is None else float(t_step)
+        k0 = int(np.searchsorted(t, t0 - 1e-12))
+        if k0 >= len(t) - 3:
+            raise ValueError(f"step_info: t_step={t0:g} s is at the end of the record")
+        initial = float(y[max(k0 - 1, 0)])
+        tt, yy = t[k0:] - t0, y[k0:]
+        fin = float(final) if final is not None else float(np.mean(yy[-max(3, len(yy) // 20):]))
+        delta = fin - initial
+        if abs(delta) < 1e-12 * max(1.0, abs(fin)):
+            raise ValueError(f"step_info: {name} does not change after t={t0:g} s")
+        z = (yy - initial) / delta                        # 0 -> 1, whichever direction the step goes
+
+        def cross(level):
+            idx = np.nonzero(z >= level)[0]
+            if not len(idx):
+                return float("nan")
+            k = int(idx[0])
+            if k == 0:
+                return float(tt[0])
+            return float(tt[k - 1] + (level - z[k - 1]) * (tt[k] - tt[k - 1]) / (z[k] - z[k - 1]))
+
+        kpk = int(np.argmax(z))
+        outside = np.nonzero(np.abs(z - 1.0) > band)[0]
+        if not len(outside):
+            settle = 0.0
+        elif outside[-1] + 1 < len(tt):
+            settle = float(tt[outside[-1] + 1])
+        else:
+            settle = float("nan")
+        return {"initial": initial, "final": fin, "rise_time": cross(0.9) - cross(0.1), "delay_time": cross(0.5),
+                "peak": float(yy[kpk]), "peak_time": float(tt[kpk]),
+                "overshoot_pct": max(0.0, float(z[kpk]) - 1.0) * 100.0, "settling_time": settle}
+
     def avg_power(self, v, i):
         """Average of v(t)*i(t) for two recorded quantities."""
         return float(np.mean(self[v] * self[i]))
@@ -94,6 +138,17 @@ class Results:
     def power(self, element):
         """Average power absorbed by an element (negative = delivered)."""
         return float(np.mean(self.voltage_across(element) * self[f"I({element})"]))
+
+    def loss_report(self, devices=None, input=None, output=None):
+        """Per-device conduction and switching losses (and efficiency when
+        ``input`` and ``output`` are given).  See :mod:`openpe.losses`."""
+        from .losses import loss_report
+        return loss_report(self, devices, input, output)
+
+    def junction_temperature(self, device, rth=None, cth=None, ta=25.0, stages=None):
+        """Junction temperature (deg C) of a device from a Foster thermal model."""
+        from .losses import junction_temperature
+        return junction_temperature(self, device, rth, cth, ta, stages)
 
     def efficiency(self, out_elements, in_elements):
         """Efficiency = sum(power absorbed by out_elements) /

@@ -4,6 +4,7 @@ Circuit elements (SPICE-like, first letter = type):
 
     R<name> n1 n2 value
     L<name> n1 n2 value [ic=..]
+    L<name> n1 n2 value isat=.. [lsat=..] [ic=..]   (saturable inductor: L falls from `value` towards lsat above isat)
     C<name> n1 n2 value [ic=..]
     V<name> n+ n- [DC v] [AC mag [phase]] [SIN(offset amp freq [phase]) | SQUARE v1 v2 freq [duty]
                   | STEP t v0 v1 | SIGNAL sig [gain]]
@@ -39,6 +40,9 @@ Control blocks:
 Directives:
 
     .tran dt t_end [method=trap|be] [start=t] [every=n] [init=ic|op]
+    .subckt NAME port1 port2 ... [param=default ...]   ...   .ends      (reusable sub-circuit)
+    X<name> node1 node2 ... NAME [param=value ...]                    (instance; names become X1.R1, X1.sw ...)
+    .losses [devices=S1,D1] [in=Vin] [out=Rload]   (loss and efficiency report after the run)
     .change time target value      (change a component/block value at a simulation time;
     .change time target key=value   e.g. '.change 5m RL 2'  or  '.change 0.3 M1 tload=4')
     .op                            (DC operating point)
@@ -94,6 +98,8 @@ BLOCK_TYPES = {
     "LOWPASS": (ctl.LowPass, 1, 1),
     "DELAY": (ctl.UnitDelay, 1, 1),
     "ZOH": (ctl.SampleHold, 1, 1),
+    "LOOKUP": (ctl.LookupTable, 1, 1),
+    "SVPWM": (ctl.SVPWM, 3, 3),
     "AVERAGE": (ctl.MovingAverage, 1, 1),
     "RMS": (ctl.RMSMeter, 1, 1),
     "VSENSOR": None,
@@ -103,8 +109,9 @@ BLOCK_TYPES = {
 
 
 class Netlist:
-    def __init__(self, circuit, tran=None, plots=None, measures=None, analyses=None, warnings=None):
+    def __init__(self, circuit, tran=None, plots=None, measures=None, analyses=None, warnings=None, losses=None):
         self.circuit = circuit
+        self.losses = losses             # None, or {"devices": [...], "input": [...], "output": [...]} from '.losses'
         self.warnings = warnings or []   # suspicious but legal input (e.g. '1M' = milli)
         self.tran = tran or {}
         self.plots = plots or []
@@ -216,7 +223,7 @@ def _freqs(kind, n, f1, f2):
     return np.logspace(np.log10(f1), np.log10(f2), count)
 
 
-def parse(text, title=None):
+def parse(text, title=None, _subckts=None):
     """Parse netlist text into a :class:`Netlist`."""
     raw = text.splitlines()
     lines = []
@@ -229,7 +236,32 @@ def parse(text, title=None):
         else:
             lines.append(s.strip())
 
+    # ---- sub-circuit definitions:  .subckt NAME port1 port2 ... [param=default ...]  ...  .ends
+    subckts = dict(_subckts or {})
+    outer = []
+    i = 0
+    while i < len(lines):
+        tk = lines[i].split()
+        if tk[0].lower() == ".subckt":
+            if len(tk) < 2:
+                raise ValueError(f"netlist line {i + 1}: .subckt needs a name")
+            ports = [t for t in tk[2:] if "=" not in t]
+            defaults = dict(t.split("=", 1) for t in tk[2:] if "=" in t)
+            body = []
+            i += 1
+            while i < len(lines) and lines[i].split()[0].lower() != ".ends":
+                body.append(lines[i])
+                i += 1
+            if i >= len(lines):
+                raise ValueError(f".subckt {tk[1]} has no matching .ends")
+            subckts[tk[1].lower()] = (tk[1], ports, defaults, body)
+        else:
+            outer.append(lines[i])
+        i += 1
+    lines = outer
+
     params = {}
+    losses = None
     c = Circuit(title or "netlist")
     tran, plots, measures, analyses, warnings = {}, [], [], [], []
     milli = re.compile(r"^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?M(?!EG)[a-zA-Z]*$")
@@ -266,6 +298,11 @@ def parse(text, title=None):
                     if "init" in kw:
                         tran["initial"] = kw["init"].lower()   # 'ic' (default) or 'op'
 
+                elif d == ".losses":
+                    _, lkw = _kv(tok[1:])
+                    losses = {"devices": [x for x in lkw.get("devices", "").split(",") if x],
+                              "input": [x for x in lkw.get("in", "").split(",") if x],
+                              "output": [x for x in lkw.get("out", "").split(",") if x]}
                 elif d == ".change":
                     pos, kw = _kv(tok[1:])
                     if len(pos) < 2 or (len(pos) < 3 and not kw):
@@ -301,6 +338,9 @@ def parse(text, title=None):
             pos, kw = _kv(tok[1:])
             if kind == "R":
                 c.add(el.Resistor(head, pos[0], pos[1], parse_value(pos[2])))
+            elif kind == "L" and "isat" in kw:
+                c.add(dv.SaturableInductor(head, pos[0], pos[1], parse_value(pos[2]), _num(kw["isat"]),
+                                           lsat=_num(kw["lsat"]) if "lsat" in kw else None, ic=_num(kw.get("ic", 0))))
             elif kind == "L":
                 c.add(el.Inductor(head, pos[0], pos[1], parse_value(pos[2]), _num(kw.get("ic", 0))))
             elif kind == "C":
@@ -325,9 +365,29 @@ def parse(text, title=None):
                 c.add(dv.CCCS(head, pos[0], pos[1], pos[2], parse_value(pos[3])))
             elif kind == "H":
                 c.add(dv.CCVS(head, pos[0], pos[1], pos[2], parse_value(pos[3])))
+            elif kind == "X" and pos and pos[-1].lower() in subckts:
+                sname, ports, defaults, body = subckts[pos[-1].lower()]
+                nodes = pos[:-1]
+                if len(nodes) != len(ports):
+                    raise ValueError(f"subcircuit {sname} has {len(ports)} port(s) ({', '.join(ports)}) "
+                                     f"but {len(nodes)} node(s) were given")
+                vals = dict(defaults)
+                lower = {k.lower(): k for k in defaults}
+                for k, v in kw.items():
+                    if k not in lower:
+                        raise ValueError(f"subcircuit {sname} has no parameter {k!r}"
+                                         + (f" (parameters: {', '.join(defaults)})" if defaults else ""))
+                    vals[lower[k]] = v
+                head_params = {**params, **vals}
+                sub_text = ".param " + " ".join(f"{k}={v}" for k, v in head_params.items()) + "\n" + "\n".join(body) \
+                    if head_params else "\n".join(body)
+                sub = parse(sub_text, title=head, _subckts=subckts)
+                c.subcircuit(head, sub.circuit, dict(zip(ports, nodes)))
+                warnings.extend(f"{head}: {w}" for w in sub.warnings)
             elif kind == "X":
                 if pos[0].upper() != "OPAMP":
-                    raise ValueError("only 'X<name> OPAMP in+ in- out ...' is supported")
+                    raise ValueError("'X<name> OPAMP in+ in- out ...' is the built-in op-amp; for a sub-circuit "
+                                     "write 'X<name> node1 node2 ... SUBCKT_NAME' with a matching .subckt definition")
                 c.add(dv.OpAmp(head, pos[1], pos[2], pos[3], **{k: _num(v) for k, v in kw.items()}))
             elif kind == "Q" and len(pos) >= 4 and pos[3].upper() in ("NPN", "PNP"):
                 opts = {k: _num(v) for k, v in kw.items()}
@@ -367,7 +427,7 @@ def parse(text, title=None):
                 raise ValueError(f"unknown element type {head!r}")
         except (IndexError, KeyError, ValueError, TypeError) as exc:
             raise ValueError(f"netlist line {lineno}: {ln!r}: {exc}") from exc
-    return Netlist(c, tran, plots, measures, analyses, warnings)
+    return Netlist(c, tran, plots, measures, analyses, warnings, losses)
 
 
 def _split_overlay(group):
@@ -407,7 +467,7 @@ def _parse_block(pos, kw):
         raise ValueError(f"{btype} expects {n_in} input(s), got {len(ins)}")
     params = {}
     for k, v in kw.items():
-        if k in ("num", "den"):
+        if k in ("num", "den", "xs", "ys"):
             params[k] = _numlist(v)
         elif k in ("signs", "carrier", "op"):
             params[k] = v
@@ -419,6 +479,8 @@ def _parse_block(pos, kw):
         return cls(outs[0], ins, btype.lower())
     if btype in ("SUM", "PRODUCT"):
         return cls(outs[0], ins, **params)
+    if btype == "SVPWM":
+        return cls(outs[0], outs[1], outs[2], ins[0], ins[1], ins[2], **params)
     if btype == "DEADTIME":
         return cls(outs[0], outs[1], ins[0], **params)
     if btype == "COMPARATOR":

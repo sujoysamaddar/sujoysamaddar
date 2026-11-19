@@ -1,0 +1,20 @@
+* Three-phase diode bridge with source inductance and RC load
+G1  sa sb sc 0  400 50
+La  sa a  0.5m
+Lb  sb b  0.5m
+Lc  sc c  0.5m
+D1  a p
+D3  b p
+D5  c p
+D4  m a
+D6  m b
+D2  m c
+Cd  p m 1m
+Rd  p m 20
+.tran 5u 100m start=60m
+.window 40m
+.plot V(p,m) I(La),I(Lb),I(Lc)
+.measure mean V(p,m)
+.measure pp V(p,m)
+.measure thd I(La) 50 2
+.end

@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openpe"
+version = "0.2.0"
+description = "Open-source power-electronics and circuit simulator: ideal switches, fast fixed-step solver, control blocks, motor drives, SPICE-style .op/.dc/.ac/Monte Carlo with nonlinear semiconductors and op-amps"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.21"]
+license = { text = "MIT" }
+
+[project.optional-dependencies]
+plot = ["matplotlib>=3.5"]
+dev = ["pytest>=7", "matplotlib>=3.5"]
+
+[project.scripts]
+openpe = "openpe.__main__:main"
+
+[tool.setuptools]
+packages = ["openpe"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

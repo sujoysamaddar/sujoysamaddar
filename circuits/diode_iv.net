@@ -1,0 +1,8 @@
+* Diode and Zener I-V characteristics by DC sweep
+.title Diode I-V sweep
+V1 a 0 DC 0
+R1 a d 100
+D1 d 0 is=1e-14 n=1 bv=5.6 ibv=1m
+.dc V1 -10 2 0.05
+.plot I(D1) V(d)
+.end

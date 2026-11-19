@@ -1,0 +1,11 @@
+* Unity-gain Sallen-Key 2nd-order low-pass, fc = 1/(2*pi*R*C*sqrt(m*n))
+.title Sallen-Key low-pass (Butterworth, 1 kHz)
+Vin in 0 DC 0 AC 1
+R1  in  a  11.25k
+R2  a   b  11.25k
+C1  a   out 20n
+C2  b   0   10n
+XU1 OPAMP b out out gain=200k gbw=1meg vmax=15 vmin=-15
+.ac dec 50 10 100k
+.plot V(out)
+.end

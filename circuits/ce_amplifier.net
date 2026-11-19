@@ -1,0 +1,21 @@
+* Common-emitter BJT amplifier with emitter bypass capacitor
+.title Common-emitter amplifier
+Vcc  vcc 0   DC 12
+Vin  src 0   DC 0 AC 1 SIN(0 10m 1k)
+Rs   src in  1k
+Cin  in  b   10u
+RB1  vcc b   47k
+RB2  b   0   10k
+RC   vcc c   2.2k
+RE   e   0   1k
+CE   e   0   100u
+Cout c   out 10u
+RL   out 0   10k
+Q1   c b e NPN is=1e-14 bf=150 vaf=100 cje=20p cjc=5p
+.op
+.ac dec 20 1 10meg
+.tran 2u 5m start=3m init=op
+.plot V(out) V(src)
+.measure pp V(out)
+.measure thd V(out) 1k 2
+.end

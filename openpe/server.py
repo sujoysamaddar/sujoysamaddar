@@ -24,12 +24,34 @@ MAX_BODY = 2_000_000
 
 
 def _decimate(t, series, max_points):
+    """Peak-preserving decimation for display (like an oscilloscope's
+    peak-detect mode): each bucket keeps its minimum and maximum, in time
+    order, so switching ripple and spikes are not lost or aliased."""
+    t = np.asarray(t)
     n = len(t)
     if n <= max_points:
-        idx = slice(None)
-    else:
-        idx = np.linspace(0, n - 1, max_points).round().astype(int)
-    return np.asarray(t)[idx], {k: np.asarray(v)[idx] for k, v in series.items()}
+        return t, {k: np.asarray(v) for k, v in series.items()}
+    nb = max(1, max_points // 2)
+    edges = np.linspace(0, n, nb + 1).astype(int)
+    t_out = np.empty(2 * nb)
+    t_out[0::2] = t[edges[:-1]]
+    t_out[1::2] = t[np.maximum(edges[1:] - 1, edges[:-1])]
+    out = {}
+    for k, v in series.items():
+        v = np.asarray(v, float)
+        lo, hi = np.empty(nb), np.empty(nb)
+        for j in range(nb):
+            seg = v[edges[j]:edges[j + 1]]
+            if seg.size == 0:
+                lo[j] = hi[j] = v[min(edges[j], n - 1)]
+                continue
+            i_min, i_max = int(np.argmin(seg)), int(np.argmax(seg))
+            a, b = (seg[i_min], seg[i_max]) if i_min <= i_max else (seg[i_max], seg[i_min])
+            lo[j], hi[j] = a, b
+        y = np.empty(2 * nb)
+        y[0::2], y[1::2] = lo, hi
+        out[k] = y
+    return t_out, out
 
 
 def _clean(a):
@@ -47,7 +69,16 @@ def simulate_netlist(text, max_points=4000):
 
     nl = parse(text)
     plot_names = [n for g in nl.plots for n in g]
-    out = {"ok": True, "version": __version__, "title": nl.circuit.title, "plots": plot_names}
+    warnings = list(nl.warnings)
+    out = {"ok": True, "version": __version__, "title": nl.circuit.title, "plots": plot_names,
+           "warnings": warnings}
+
+    def plotted(res, default):
+        missing = [n for n in plot_names if n not in res]
+        if missing:
+            avail = [k for k in res.names][:30]
+            warnings.append(f".plot: {', '.join(missing)} not found. Available: {', '.join(avail)}")
+        return [n for n in plot_names if n in res] or default
 
     for a in nl.analyses:
         if a[0] == "op":
@@ -55,7 +86,7 @@ def simulate_netlist(text, max_points=4000):
             out["op"] = {"voltages": op.voltages, "probes": op.probes}
         elif a[0] == "dc":
             r = nl.dc()
-            names = [n for n in plot_names if n in r] or [k for k in r.names if k.startswith("V(")][:8]
+            names = plotted(r, [k for k in r.names if k.startswith("V(")][:8])
             out["dc"] = {"source": a[1], "x": _clean(r.t),
                          "signals": {n: _clean(r[n]) for n in names}}
         elif a[0] == "ac":
@@ -77,7 +108,7 @@ def simulate_netlist(text, max_points=4000):
             raise ValueError(f"transient needs {steps:.3g} steps (limit {MAX_STEPS:g}); "
                              f"increase the time step or shorten the simulation")
         res = nl.run()
-        names = [n for n in plot_names if n in res] or [n for n in res.names if n.startswith("V(")][:8]
+        names = plotted(res, [n for n in res.names if n.startswith("V(")][:8])
         t, sig = _decimate(res.t, {n: res[n] for n in names}, max_points)
         stats = dict(res.meta["stats"])
         out["tran"] = {"t": _clean(t), "signals": {n: _clean(v) for n, v in sig.items()},
@@ -85,7 +116,14 @@ def simulate_netlist(text, max_points=4000):
         if nl.measures:
             from .__main__ import _measure
             mres = res.last(nl.window) if nl.window else res
-            out["measures"] = {" ".join(m): _measure(mres, m) for m in nl.measures}
+            out["measures"] = {}
+            for m in nl.measures:                # one bad .measure must not lose the results
+                label = " ".join(m)
+                try:
+                    out["measures"][label] = float(_measure(mres, m))
+                except Exception as exc:
+                    out["measures"][label] = None
+                    warnings.append(f".measure {label}: {exc}")
     if not nl.tran and not nl.analyses:
         raise ValueError("the netlist has no analysis: enable Transient, Operating point, AC or DC sweep")
     return out

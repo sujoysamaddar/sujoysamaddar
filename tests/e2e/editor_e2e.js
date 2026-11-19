@@ -117,6 +117,24 @@ const near = (a, b, tol) => Math.abs(a - b) <= tol;
   assert(near(res.op.voltages[mid], 5, 1e-6), `divider mid = ${res.op.voltages[mid]}`);
   console.log("divider built with the mouse: V(mid) =", res.op.voltages[mid]);
 
+  // ---- 2b. design-time tuning: arrow keys step a value, Auto-run re-simulates
+  await page.locator("#bAuto").click();
+  assert(await page.locator("#bAuto").evaluate((b) => b.classList.contains("on")), "auto-run toggled on");
+  const R1 = (await page.evaluate(() => OpenPE.doc)).comps.find((c) => c.props.name === "R1");
+  await page.mouse.click(...at(R1.x, R1.y));
+  const rField = page.locator('#props input[data-k="value"]');
+  await rField.click();
+  for (let i = 0; i < 3; i++) await rField.press("ArrowUp");          // 1k -> 1.1k -> 1.21k -> 1.33k
+  assert((await rField.inputValue()) === "1.33k", "stepped value " + (await rField.inputValue()));
+  await page.waitForFunction((m) => OpenPE.results && OpenPE.results.op &&
+      Math.abs(OpenPE.results.op.voltages[m] - 10 * 1000 / 2330) < 1e-6, mid, { timeout: 15000 });
+  await rField.press("Shift+ArrowDown");                              // /10 -> 133
+  assert((await rField.inputValue()) === "133", "shift-step " + (await rField.inputValue()));
+  await rField.fill("1k"); await rField.press("Enter");
+  await page.waitForFunction((m) => OpenPE.results && Math.abs(OpenPE.results.op.voltages[m] - 5) < 1e-6, mid, { timeout: 15000 });
+  await page.locator("#bAuto").click();                               // back off for the rest of the test
+  console.log("design-time tuning with arrow keys + auto-run ok");
+
   // ---- 3. move R2 by dragging its body: attached wires must follow
   const before = await pin("R2", 0);
   const R2b = (await page.evaluate(() => OpenPE.doc)).comps.find((c) => c.props.name === "R2");
@@ -153,6 +171,13 @@ const near = (a, b, tol) => Math.abs(a - b) <= tol;
   await page.evaluate(() => OpenPE.loadDoc(OpenPE.EXAMPLES["Buck converter (PWM)"]()));
   const kinds = await page.evaluate(() => { const n = OpenPE.computeNets(); return [...n.kinds.values()]; });
   assert(kinds.includes("s") && kinds.includes("p"), "signal and power nets distinguished");
+
+  // ---- 6. server warnings (e.g. SPICE "1M" = milli) appear in Messages
+  await page.evaluate(() => { const r = OpenPE.doc.comps.find((c) => c.type === "R"); r.props.value = "1M"; });
+  await page.evaluate(() => OpenPE.runSim());
+  await page.waitForFunction(() => OpenPE.results && OpenPE.results.warnings && OpenPE.results.warnings.length);
+  await page.locator('.tab[data-tab="msg"]').click();
+  assert((await page.locator("#tabBody").innerText()).includes("milli"), "warning shown in Messages");
 
   if (shot) {
     await page.evaluate(() => OpenPE.runSim());

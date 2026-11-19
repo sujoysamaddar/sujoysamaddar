@@ -177,14 +177,10 @@ class Results:
         Each group is a signal name or a list of names to overlay:
             res.plot("V(out)", ["I(L1)", "I(D1)"], save="buck.png")
         """
-        import matplotlib
-        if not show:
-            matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
 
         groups = groups or [[n] for n in self.names]
         groups = [[g] if isinstance(g, str) else list(g) for g in groups]
-        fig, axes = plt.subplots(len(groups), 1, sharex=True,
+        fig, axes = _subplots(show, len(groups), 1, sharex=True,
                                  figsize=figsize or (9, 2.2 * len(groups) + 0.8), squeeze=False)
         xlabel = self.meta.get("xlabel")
         if xlabel:
@@ -204,21 +200,15 @@ class Results:
         fig.tight_layout()
         if save:
             fig.savefig(save, dpi=120)
-        if show:
-            plt.show()
-        plt.close(fig)
+        _finish(fig, show)
         return fig
 
     def plot_spectrum(self, name, f0, cycles=1, fmax=None, save=None, show=False, title=None):
-        import matplotlib
-        if not show:
-            matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
         f, a, _ = self.fft(name, f0, cycles)
         if fmax:
             m = f <= fmax
             f, a = f[m], a[m]
-        fig, ax = plt.subplots(figsize=(9, 3.2))
+        fig, ax = _subplots(show, figsize=(9, 3.2))
         ax.bar(f, a, width=(f[1] - f[0]) * 0.8)
         ax.set_xlabel("frequency (Hz)")
         ax.set_ylabel("amplitude")
@@ -227,10 +217,31 @@ class Results:
         fig.tight_layout()
         if save:
             fig.savefig(save, dpi=120)
-        if show:
-            plt.show()
-        plt.close(fig)
+        _finish(fig, show)
         return fig
+
+
+def _subplots(show, *args, figsize=None, **kw):
+    """Create a figure without touching matplotlib's global backend.
+
+    Saved-only figures are standalone ``Figure`` objects (no pyplot, no GUI
+    backend), so saving a plot never stops later interactive windows - or an
+    embedding GUI - from working.  ``show=True`` uses pyplot as usual.
+    """
+    if show:
+        import matplotlib.pyplot as plt
+        fig = plt.figure(figsize=figsize)
+    else:
+        from matplotlib.figure import Figure
+        fig = Figure(figsize=figsize)
+    return fig, fig.subplots(*args, **kw)
+
+
+def _finish(fig, show):
+    if show:
+        import matplotlib.pyplot as plt
+        plt.show()
+        plt.close(fig)
 
 
 def _list(x):

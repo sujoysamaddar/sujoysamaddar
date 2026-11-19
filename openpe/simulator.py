@@ -22,7 +22,7 @@ from collections import OrderedDict
 import numpy as np
 
 from . import elements as el
-from .results import Results
+from .results import Results, _finish, _subplots
 
 
 class _Ctx:
@@ -698,11 +698,7 @@ class ACResult:
         return float(self.freq[k]), float(m[k])
 
     def plot(self, *outs, ref=None, title=None, save=None, show=False):
-        import matplotlib
-        if not show:
-            matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        fig, (a1, a2) = plt.subplots(2, 1, sharex=True, figsize=(8, 5.5))
+        fig, (a1, a2) = _subplots(show, 2, 1, sharex=True, figsize=(8, 5.5))
         for o in outs:
             lbl = o if ref is None else f"{o}/{ref}"
             a1.semilogx(self.freq, self.mag_db(o, ref), label=lbl)
@@ -717,7 +713,5 @@ class ACResult:
         fig.tight_layout()
         if save:
             fig.savefig(save, dpi=120)
-        if show:
-            plt.show()
-        plt.close(fig)
+        _finish(fig, show)
         return fig

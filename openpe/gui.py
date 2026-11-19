@@ -63,7 +63,14 @@ class Studio:
         self.root = root
         self.path = None
         self.dirty = False
-        self.busy = False
+        self._closed = False
+        self._jobs = set()
+        self.sim_busy = False        # a simulation / sweep is running
+        self.script_busy = False     # an example script is running
+        self.pending_run = False     # re-run requested while a simulation was running
+        self._autorun_job = self._param_job = None
+        self.params, self.nominal = [], {}
+        self.sweep_data = None
         self.result = None
         self.proc = None
         self.server = None
@@ -75,7 +82,7 @@ class Studio:
         self.mono_b = self.mono.copy()
         self.mono_b.configure(weight="bold")
         root.title("OpenPE Studio")
-        root.geometry("1320x840")
+        root.geometry("1440x860")
         root.minsize(900, 560)
         root.protocol("WM_DELETE_WINDOW", self.quit)
         self._build_menu()
@@ -94,7 +101,39 @@ class Studio:
         else:
             default = os.path.join(CIRCUITS, "buck_current_mode.net")
             self.load(default) if os.path.exists(default) else self.set_text(NEW_NETLIST)
-        root.after(100, self._poll)
+        self._closed = False
+        self._poll_job = self._after(100, self._poll)
+
+
+    # ------------------------------------------------------------------ timers
+    def _after(self, ms, fn):
+        """root.after() that is tracked, so closing the window cancels it."""
+        if getattr(self, "_closed", False):
+            return None
+        jobs = self.__dict__.setdefault("_jobs", set())
+
+        def run():
+            jobs.discard(job)
+            fn()
+
+        job = self.root.after(ms, run)
+        jobs.add(job)
+        return job
+
+    def _after_idle(self, fn):
+        return self._after(1, fn)
+
+    def _cancel(self, job):
+        if job:
+            self.__dict__.setdefault("_jobs", set()).discard(job)
+            try:
+                self.root.after_cancel(job)
+            except tk.TclError:
+                pass
+
+    @property
+    def busy(self):
+        return self.sim_busy or self.script_busy
 
     # ------------------------------------------------------------------ layout
     def _build_menu(self):
@@ -111,6 +150,7 @@ class Studio:
         m.add_cascade(label="File", menu=f)
         r = tk.Menu(m, tearoff=False)
         r.add_command(label="Run netlist", accelerator="F5", command=self.run_netlist)
+        r.add_command(label="Sweep selected parameter", command=self.run_sweep)
         r.add_command(label="Run selected example script", command=self.run_selected_script)
         r.add_command(label="Stop script", command=self.stop_script)
         m.add_cascade(label="Run", menu=r)
@@ -145,7 +185,7 @@ class Studio:
         lib = ttk.Frame(outer, padding=4)
         ttk.Label(lib, text="Library", font=("TkDefaultFont", 10, "bold")).pack(anchor="w")
         self.tree = ttk.Treeview(lib, show="tree", selectmode="browse")
-        self.tree.column("#0", width=250, minwidth=150)
+        self.tree.column("#0", width=210, minwidth=150)
         self.tree.pack(fill="both", expand=True)
         self.tree.bind("<Double-1>", self._tree_open)
         self.tree.bind("<Return>", self._tree_open)
@@ -153,6 +193,7 @@ class Studio:
         outer.add(lib, weight=1)
         right = ttk.PanedWindow(outer, orient="vertical")
         outer.add(right, weight=5)
+        self._build_param_panel(outer)
         # editor
         ed = ttk.Frame(right)
         self.file_label = tk.StringVar(value="untitled.net")
@@ -269,13 +310,18 @@ class Studio:
         self.text.edit_modified(False)
         self.dirty = False
         self._highlight()
+        self.nominal = {}                    # a new design: remember its original values
+        self.refresh_params()
 
     def _on_modified(self, _e=None):
         if self.text.edit_modified():
             self.dirty = True
             self.text.edit_modified(False)
             self._title()
-            self.root.after_idle(self._highlight)
+            self._after_idle(self._highlight)
+            if self._param_job:
+                self._cancel(self._param_job)
+            self._param_job = self._after(400, self.refresh_params)
 
     def _highlight(self):
         for t in ("comment", "directive", "block", "elem"):
@@ -353,10 +399,13 @@ class Studio:
             self.run_script(iid[3:])
 
     # ------------------------------------------------------------------ simulation
-    def _set_busy(self, busy, msg=""):
-        self.busy = busy
-        self.run_btn.state(["disabled"] if busy else ["!disabled"])
-        if busy:
+    def _set_busy(self, busy, msg="", which="sim"):
+        if which == "sim":
+            self.sim_busy = busy
+        else:
+            self.script_busy = busy
+        self.run_btn.state(["disabled"] if self.sim_busy else ["!disabled"])
+        if self.busy:
             self.progress.start(12)
         else:
             self.progress.stop()
@@ -371,8 +420,13 @@ class Studio:
         self.log.configure(state="disabled")
 
     def run_netlist(self):
-        if self.busy:
+        self._autorun_job = None
+        if getattr(self, "_closed", False):
             return
+        if self.sim_busy:
+            self.pending_run = True          # run again with the latest values when done
+            return
+        self.pending_run = False
         from .server import simulate_netlist
         text = self.text.get("1.0", "end-1c")
         self._set_busy(True, "Simulating...")
@@ -398,24 +452,48 @@ class Studio:
                     self._set_busy(False, "Simulation failed - see Log")
                     self.log_write(msg[1] + "\n", "err")
                     self.nb.select(self.nb.tabs()[-1])
+                    self._maybe_rerun()
+                elif kind == "sweepprog":
+                    self.status.set(f"Sweep: run {msg[1]} of {msg[2]} ({msg[3]})...")
+                elif kind == "sweep":
+                    self._show_sweep(msg[1])
+                elif kind == "sweeperr":
+                    self._set_busy(False, "Sweep failed - see Log")
+                    self.log_write(msg[1] + "\n", "err")
+                    self.nb.select(self.nb.tabs()[-1])
                 elif kind == "out":
                     self.log_write(msg[1])
                 elif kind == "done":
                     self._script_done(*msg[1:])
         except queue.Empty:
             pass
-        self.root.after(80, self._poll)
+        if not self._closed:
+            self._poll_job = self._after(80, self._poll)
+
+    def _maybe_rerun(self):
+        if self.pending_run:
+            self.pending_run = False
+            self._after(10, self.run_netlist)
 
     def _show_results(self, res, dt):
         self.result = res
+        self.sweep_data = None
         self._set_busy(False, f"{res.get('title', '')}: finished in {dt:.2f} s")
         self.log_write(f"[{time.strftime('%H:%M:%S')}] {res.get('title', '')}: simulation finished in {dt:.2f} s\n", "ok")
+        for w in res.get("warnings") or []:
+            self.log_write(f"  warning: {w}\n", "err")
+        if res.get("warnings"):
+            self.status.set(self.status.get() + f"  -  {len(res['warnings'])} warning(s), see Log")
+        self._update_signal_choices(res)
+        self._maybe_rerun()
         if "tran" in res:
             st = res["tran"]["stats"]
             self.log_write("  transient: " + ", ".join(f"{k}={v}" for k, v in st.items()) + "\n")
         for k, v in (res.get("measures") or {}).items():
-            self.log_write(f"  {k} = {_fmt(v)}\n")
-        self.measure_var.set("\n".join(f"{k} = {_fmt(v)}" for k, v in (res.get("measures") or {}).items()))
+            if v is not None:
+                self.log_write(f"  {k} = {_fmt(v)}\n")
+        self.measure_var.set("\n".join(f"{k} = {_fmt(v) if v is not None else 'error'}"
+                                        for k, v in (res.get("measures") or {}).items()))
         # waveforms
         self.sig_list.delete(0, "end")
         if "tran" in res:
@@ -527,6 +605,314 @@ class Studio:
                 f.write(",".join([repr(tv)] + [repr(res["tran"]["signals"][n][k]) for n in names]) + "\n")
         self.status.set(f"Exported {len(names)} signals to {p}")
 
+
+    # ------------------------------------------------------------------ design-time parameters
+    def _build_param_panel(self, outer):
+        pane = ttk.Frame(outer, padding=4)
+        outer.add(pane, weight=2)
+        ttk.Label(pane, text="Design parameters", font=("TkDefaultFont", 10, "bold")).pack(anchor="w")
+        self.autorun = tk.BooleanVar(value=True)
+        ttk.Checkbutton(pane, text="Auto-run after each change", variable=self.autorun).pack(anchor="w")
+        self.filter_var = tk.StringVar()
+        frow = ttk.Frame(pane)
+        frow.pack(fill="x", pady=(4, 2))
+        ttk.Label(frow, text="Filter").pack(side="left")
+        ttk.Entry(frow, textvariable=self.filter_var).pack(side="left", fill="x", expand=True, padx=(4, 0))
+        self.filter_var.trace_add("write", lambda *a: self.refresh_params())
+        tf = ttk.Frame(pane)
+        tf.pack(fill="both", expand=True)
+        self.ptree = ttk.Treeview(tf, columns=("value",), show="tree headings", selectmode="browse", height=12)
+        self.ptree.heading("#0", text="Parameter")
+        self.ptree.heading("value", text="Value")
+        self.ptree.column("#0", width=150, minwidth=110)
+        self.ptree.column("value", width=80, minwidth=60, anchor="e")
+        ys = ttk.Scrollbar(tf, orient="vertical", command=self.ptree.yview)
+        self.ptree.configure(yscrollcommand=ys.set)
+        ys.pack(side="right", fill="y")                     # pack first so it is never squeezed out
+        self.ptree.pack(side="left", fill="both", expand=True)
+        self.ptree.bind("<<TreeviewSelect>>", lambda e: self._param_selected())
+        self.ptree.bind("<Double-1>", lambda e: (self.p_entry.focus_set(), self.p_entry.select_range(0, "end")))
+        self.ptree.tag_configure("changed", foreground="#d97706")
+        # tune box
+        tune = ttk.LabelFrame(pane, text="Change value", padding=6)
+        tune.pack(fill="x", pady=4)
+        self.p_name = tk.StringVar(value="select a parameter")
+        ttk.Label(tune, textvariable=self.p_name, font=("TkDefaultFont", 9, "bold")).grid(row=0, column=0, columnspan=3, sticky="w")
+        self.p_value = tk.StringVar()
+        self.p_entry = ttk.Entry(tune, textvariable=self.p_value, width=12)
+        self.p_entry.grid(row=1, column=0, sticky="ew", pady=2)
+        self.p_entry.bind("<Return>", lambda e: self.apply_param())
+        self.p_entry.bind("<Up>", lambda e: self.step_param(+1))
+        self.p_entry.bind("<Down>", lambda e: self.step_param(-1))
+        ttk.Button(tune, text="Apply", width=6, command=self.apply_param).grid(row=1, column=1, padx=2)
+        ttk.Button(tune, text="Reset", width=6, command=self.reset_param).grid(row=1, column=2)
+        self.p_scale = tk.Scale(tune, from_=-1.0, to=1.0, resolution=0.01, orient="horizontal", showvalue=False,
+                                command=self._scale_moved, length=180)
+        self.p_scale.grid(row=2, column=0, columnspan=3, sticky="ew")
+        self.p_scale.bind("<ButtonRelease-1>", lambda e: self.apply_param())
+        self.p_range = tk.StringVar(value="slider: nominal ÷10 … ×10")
+        ttk.Label(tune, textvariable=self.p_range, foreground="gray").grid(row=3, column=0, columnspan=3, sticky="w")
+        ttk.Label(tune, text="↑/↓ in the box: ±10 %", foreground="gray").grid(row=4, column=0, columnspan=3, sticky="w")
+        tune.columnconfigure(0, weight=1)
+        # sweep box
+        sw = ttk.LabelFrame(pane, text="Parameter sweep", padding=6)
+        sw.pack(fill="x", pady=4)
+        self.sw_from, self.sw_to, self.sw_n = tk.StringVar(), tk.StringVar(), tk.StringVar(value="5")
+        self.sw_log = tk.BooleanVar(value=False)
+        for r, (lbl, var) in enumerate((("From", self.sw_from), ("To", self.sw_to), ("Steps", self.sw_n))):
+            ttk.Label(sw, text=lbl).grid(row=r, column=0, sticky="w")
+            ttk.Entry(sw, textvariable=var, width=10).grid(row=r, column=1, sticky="ew", pady=1)
+        ttk.Checkbutton(sw, text="log", variable=self.sw_log).grid(row=2, column=2)
+        ttk.Label(sw, text="Signal").grid(row=3, column=0, sticky="w")
+        self.sw_signal = ttk.Combobox(sw, width=14, state="readonly")
+        self.sw_signal.grid(row=3, column=1, columnspan=2, sticky="ew", pady=1)
+        ttk.Button(sw, text="Run sweep", command=self.run_sweep).grid(row=4, column=0, columnspan=3, sticky="ew", pady=(4, 0))
+        sw.columnconfigure(1, weight=1)
+
+    def refresh_params(self):
+        from .designparams import extract_params
+        self._param_job = None
+        text = self.text.get("1.0", "end-1c")
+        self.params = extract_params(text)
+        for p in self.params:
+            self.nominal.setdefault(p.label, p.value)
+        sel = self._selected_label()
+        flt = self.filter_var.get().strip().lower()
+        self.ptree.delete(*self.ptree.get_children())
+        groups = {}
+        for p in self.params:
+            if flt and flt not in p.label.lower():
+                continue
+            if p.group not in groups:
+                groups[p.group] = self.ptree.insert("", "end", text=p.group, open=True)
+            tags = ("changed",) if self.nominal.get(p.label) != p.value else ()
+            self.ptree.insert(groups[p.group], "end", iid="p:" + p.label, text=p.name, values=(p.value,), tags=tags)
+        if sel and self.ptree.exists("p:" + sel):
+            self.ptree.selection_set("p:" + sel)
+            self.ptree.see("p:" + sel)
+        self._update_signal_choices()
+
+    def _selected_label(self):
+        sel = self.ptree.selection() if hasattr(self, "ptree") else ()
+        return sel[0][2:] if sel and sel[0].startswith("p:") else None
+
+    def _current_param(self):
+        lbl = self._selected_label()
+        return next((p for p in self.params if p.label == lbl), None) if lbl else None
+
+    def select_param(self, label):
+        """Select a design parameter by label, e.g. 'R1.value' or 'B4.kp'."""
+        self.ptree.selection_set("p:" + label)
+        self._param_selected()
+
+    def _param_selected(self):
+        p = self._current_param()
+        if not p:
+            return
+        self.p_name.set(f"{p.group} → {p.name}   (original {self.nominal.get(p.label, p.value)})")
+        self.p_value.set(p.value)
+        self._scale_lock = True
+        self.p_scale.set(0.0)
+        self._scale_lock = False
+        nom = self._nominal_number(p)
+        if nom:
+            from .designparams import format_value
+            self.p_range.set(f"slider: {format_value(nom / 10)} … {format_value(nom * 10)}")
+            if not self.sw_from.get() or self._sweep_for != p.label:
+                self.sw_from.set(format_value(nom / 2))
+                self.sw_to.set(format_value(nom * 2))
+        else:
+            self.p_range.set("slider: (value is zero - type a value)")
+        self._sweep_for = p.label
+
+    _sweep_for = None
+    _scale_lock = False
+
+    def _nominal_number(self, p):
+        from .units import parse_value
+        try:
+            v = parse_value(self.nominal.get(p.label, p.value))
+        except ValueError:
+            return None
+        return v if v else None
+
+    def _scale_moved(self, x):
+        if self._scale_lock:
+            return
+        p = self._current_param()
+        nom = self._nominal_number(p) if p else None
+        if nom:
+            from .designparams import format_value
+            self.p_value.set(format_value(nom * 10 ** float(x), 3))
+
+    def step_param(self, direction):
+        from .designparams import format_value
+        from .units import parse_value
+        try:
+            v = parse_value(self.p_value.get())
+        except ValueError:
+            return "break"
+        self.p_value.set(format_value(v * (1.1 if direction > 0 else 1 / 1.1) if v else 0.1 * direction, 3))
+        self.apply_param()
+        return "break"
+
+    def reset_param(self):
+        p = self._current_param()
+        if p:
+            self.p_value.set(self.nominal.get(p.label, p.value))
+            self.apply_param()
+
+    def apply_param(self, value=None):
+        """Write the edited value into the netlist (and re-run if Auto-run)."""
+        from .units import parse_value
+        p = self._current_param()
+        if not p:
+            return False
+        new = (value if value is not None else self.p_value.get()).strip()
+        try:
+            parse_value(new)
+        except ValueError:
+            messagebox.showerror("Invalid value", f"'{new}' is not a number (examples: 4.7k, 100u, 2meg, 1e-3).")
+            return False
+        if new == p.value:
+            return True
+        line = p.line + 1
+        self.text.delete(f"{line}.{p.start}", f"{line}.{p.end}")
+        self.text.insert(f"{line}.{p.start}", new)
+        self._highlight()
+        self.refresh_params()
+        self.status.set(f"{p.label} = {new}")
+        if self.autorun.get():
+            if self._autorun_job:
+                self._cancel(self._autorun_job)
+            self._autorun_job = self._after(250, self.run_netlist)
+        return True
+
+    def _update_signal_choices(self, res=None):
+        names = []
+        res = res or self.result
+        if res:
+            for k in ("tran", "dc"):
+                if k in res:
+                    names += [n for n in res[k]["signals"] if n not in names]
+            if "ac" in res:
+                names += [n for n in res["ac"]["traces"] if n not in names]
+        if not names:
+            try:
+                from .netlist import parse
+                names = [n for g in parse(self.text.get("1.0", "end-1c")).plots for n in g]
+            except Exception:
+                names = []
+        self.sw_signal["values"] = names
+        if names and self.sw_signal.get() not in names:
+            self.sw_signal.set(names[0])
+
+    def run_sweep(self):
+        from .designparams import format_value, set_param, sweep_values
+        p = self._current_param()
+        if not p:
+            messagebox.showinfo("Parameter sweep", "Select a parameter in the Design parameters list first.")
+            return
+        if self.sim_busy:
+            return
+        try:
+            values = sweep_values(self.sw_from.get(), self.sw_to.get(), self.sw_n.get(), self.sw_log.get())
+        except (ValueError, TypeError) as exc:
+            messagebox.showerror("Parameter sweep", f"Invalid sweep range: {exc}")
+            return
+        signal = self.sw_signal.get()
+        if not signal:
+            messagebox.showinfo("Parameter sweep", "Add a .plot line (or run once) so there is a signal to compare.")
+            return
+        base = self.text.get("1.0", "end-1c")
+        self._set_busy(True, f"Sweeping {p.label} ({len(values)} runs)...")
+
+        def work():
+            from .netlist import parse
+            from .server import _decimate
+            runs = []
+            try:
+                for k, v in enumerate(values, 1):
+                    txt = set_param(base, p, format_value(v))
+                    self.q.put(("sweepprog", k, len(values), f"{p.label}={format_value(v)}"))
+                    nl = parse(txt)
+                    run = {"value": v, "label": f"{p.label}={format_value(v)}"}
+                    if nl.tran:
+                        res = nl.run()
+                        if signal not in res:
+                            raise ValueError(f"signal {signal} not found")
+                        win = res.last(nl.window) if nl.window else res.window(res.t[-1] * 0.5)
+                        y = res[signal]
+                        t, d = _decimate(res.t, {signal: y}, 3000)
+                        run.update(kind="tran", x=t, y=d[signal], mean=win.mean(signal), min=win.min(signal),
+                                   max=win.max(signal), final=float(y[-1]))
+                    elif any(a[0] == "ac" for a in nl.analyses):
+                        r = nl.ac()
+                        lo, hi = r.corners(signal)
+                        f_pk, g_pk = r.peak(signal)
+                        run.update(kind="ac", x=r.freq, y=r.mag_db(signal), peak_db=g_pk, peak_hz=f_pk, f_high=hi)
+                    elif any(a[0] == "dc" for a in nl.analyses):
+                        r = nl.dc()
+                        run.update(kind="dc", x=r.t, y=r[signal])
+                    else:
+                        op = nl.op()
+                        run.update(kind="op", y=op[signal])
+                    runs.append(run)
+                self.q.put(("sweep", {"param": p.label, "signal": signal, "runs": runs}))
+            except Exception as exc:
+                self.q.put(("sweeperr", f"Sweep failed at {p.label}: {type(exc).__name__}: {exc}"))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _show_sweep(self, data):
+        self.sweep_data = data
+        runs = data["runs"]
+        self._set_busy(False, f"Sweep of {data['param']} finished ({len(runs)} runs)")
+        sig = data["signal"]
+        kind = runs[0]["kind"] if runs else "op"
+        self.log_write(f"\n=== sweep of {data['param']}, signal {sig} ===\n", "ok")
+        if kind == "tran":
+            self.log_write(f"{'value':>12} {'mean':>12} {'min':>12} {'max':>12} {'final':>12}\n")
+            for r in runs:
+                self.log_write(f"{_fmt(r['value']):>12} {_fmt(r['mean']):>12} {_fmt(r['min']):>12} "
+                               f"{_fmt(r['max']):>12} {_fmt(r['final']):>12}\n")
+        elif kind == "ac":
+            for r in runs:
+                self.log_write(f"{_fmt(r['value']):>12}  peak {r['peak_db']:.2f} dB @ {_fmt(r['peak_hz'], 'Hz')}, "
+                               f"-3 dB high {_fmt(r['f_high'], 'Hz')}\n")
+        elif kind == "op":
+            for r in runs:
+                self.log_write(f"{_fmt(r['value']):>12}  {sig} = {_fmt(r['y'])}\n")
+        # overlay plot on the Waveforms tab
+        fig = self.fig_w
+        fig.clear()
+        ax = fig.add_subplot(111)
+        import matplotlib.cm as cm
+        cmap = cm.get_cmap("viridis") if hasattr(cm, "get_cmap") else matplotlib.colormaps["viridis"]
+        for k, r in enumerate(runs):
+            c = cmap(k / max(1, len(runs) - 1))
+            if kind == "ac":
+                ax.semilogx(r["x"], r["y"], color=c, label=r["label"])
+            elif kind == "op":
+                ax.plot([r["value"]], [r["y"]], "o", color=c)
+            else:
+                ax.plot(r["x"], r["y"], color=c, lw=1, label=r["label"])
+        if kind == "op":
+            ax.plot([r["value"] for r in runs], [r["y"] for r in runs], "-", color="gray")
+            ax.set_xlabel(data["param"])
+        elif kind == "tran":
+            ax.xaxis.set_major_formatter(EngFormatter(unit="s"))
+            ax.set_xlabel("time")
+        elif kind == "ac":
+            ax.xaxis.set_major_formatter(EngFormatter(unit="Hz"))
+            ax.set_ylabel(f"|{sig}| (dB)")
+        ax.set_title(f"Sweep of {data['param']}: {sig}")
+        if kind != "op":
+            ax.legend(fontsize=8, loc="best")
+        ax.grid(True, alpha=0.3)
+        self.canvas_w.draw_idle()
+        self.nb.select(self.nb.tabs()[0])
+
     # ------------------------------------------------------------------ example scripts
     def run_selected_script(self):
         iid = self.tree.focus()
@@ -542,7 +928,7 @@ class Studio:
         name = os.path.basename(path)
         self.log_write(f"\n=== running {name} ===\n", "ok")
         self.nb.select(self.nb.tabs()[-1])
-        self._set_busy(True, f"Running {name}...")
+        self._set_busy(True, f"Running {name}...", which="script")
         start = time.time()
         env = dict(os.environ, MPLBACKEND="Agg", PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
         self.proc = subprocess.Popen([sys.executable, path], cwd=PROJECT, env=env, stdout=subprocess.PIPE,
@@ -561,7 +947,7 @@ class Studio:
             self.log_write("stopped\n", "err")
 
     def _script_done(self, name, code, start):
-        self._set_busy(False, f"{name} {'finished' if code == 0 else f'failed (exit code {code})'}")
+        self._set_busy(False, f"{name} {'finished' if code == 0 else f'failed (exit code {code})'}", which="script")
         self.log_write(f"--- {name}: {'OK' if code == 0 else f'exit code {code}'} ({time.time() - start:.1f} s)\n",
                        "ok" if code == 0 else "err")
         out_dir = os.path.join(EXAMPLES, "output")
@@ -574,9 +960,11 @@ class Studio:
                 self.img_list.insert("end", os.path.basename(p))
             self.img_list.selection_set(0)
             self.nb.select(self.nb.tabs()[4])
-            self.root.after(50, self._show_image)
+            self._after(50, self._show_image)
 
     def _show_image(self):
+        if getattr(self, "_closed", False):
+            return
         sel = self.img_list.curselection()
         if not sel or not self.images:
             return
@@ -630,6 +1018,22 @@ class Studio:
         if self.server is not None:
             self.server.shutdown()
             self.server.server_close()
+        # flush pending redraws, then cancel every timer so nothing fires
+        # into a destroyed window
+        try:
+            self.root.update_idletasks()
+        except tk.TclError:
+            pass
+        self._closed = True
+        for job in list(self.__dict__.get("_jobs", ())):
+            self._cancel(job)
+        for canvas in (self.canvas_w, self.canvas_ac, self.canvas_dc):
+            idle = getattr(canvas, "_idle_draw_id", None)
+            if idle:
+                try:
+                    self.root.after_cancel(idle)
+                except tk.TclError:
+                    pass
         self.root.destroy()
 
 

@@ -100,8 +100,9 @@ BLOCK_TYPES = {
 
 
 class Netlist:
-    def __init__(self, circuit, tran=None, plots=None, measures=None, analyses=None):
+    def __init__(self, circuit, tran=None, plots=None, measures=None, analyses=None, warnings=None):
         self.circuit = circuit
+        self.warnings = warnings or []   # suspicious but legal input (e.g. '1M' = milli)
         self.tran = tran or {}
         self.plots = plots or []
         self.measures = measures or []
@@ -227,7 +228,8 @@ def parse(text, title=None):
 
     params = {}
     c = Circuit(title or "netlist")
-    tran, plots, measures, analyses = {}, [], [], []
+    tran, plots, measures, analyses, warnings = {}, [], [], [], []
+    milli = re.compile(r"^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?M(?!EG)[a-zA-Z]*$")
 
     def subst(s):
         return re.sub(r"\{(\w+)\}", lambda m: params[m.group(1)], s)
@@ -236,6 +238,11 @@ def parse(text, title=None):
         ln = subst(ln)
         tok = ln.split()
         head = tok[0]
+        for t in tok[1:]:
+            v = t.split("=", 1)[-1]
+            if milli.match(v) and not v.upper().startswith("MEG", len(v.rstrip("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"))):
+                warnings.append(f"line {lineno}: '{v}' means {parse_value(v):g} (SPICE: M = milli); "
+                                f"write '{v.split('M')[0]}meg' for mega")
         try:
             if head.startswith("."):
                 d = head.lower()
@@ -346,7 +353,7 @@ def parse(text, title=None):
                 raise ValueError(f"unknown element type {head!r}")
         except (IndexError, KeyError, ValueError, TypeError) as exc:
             raise ValueError(f"netlist line {lineno}: {ln!r}: {exc}") from exc
-    return Netlist(c, tran, plots, measures, analyses)
+    return Netlist(c, tran, plots, measures, analyses, warnings)
 
 
 def _split_overlay(group):

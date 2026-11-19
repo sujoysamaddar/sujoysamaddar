@@ -129,6 +129,7 @@ svg .box { fill: rgba(37, 99, 235, .08); stroke: var(--accent); stroke-dasharray
     <button class="btn" id="bGrid" title="Snap to grid (G)">Snap</button>
     <button class="btn" id="bNetlist" title="Download netlist (.net)">Netlist ⤓</button>
     <button class="btn" id="bSettings" title="Simulation settings">Analyses…</button>
+    <button class="btn" id="bAuto" title="Re-run the simulation automatically after every change">Auto-run</button>
     <button class="btn primary" id="bRun" title="Run simulation (F5 / Ctrl+Enter)">▶ Run</button>
     <span class="sep"></span>
     <button class="btn" id="bTheme" title="Toggle light/dark">◐</button>
@@ -180,6 +181,15 @@ function fmtEng(v, unit = "") {
   return v.toExponential(3) + unit;
 }
 // accepts SPICE-style values: 10k, 4.7u, 2meg, 1e-3
+// number -> SPICE text with an SI suffix (2200 -> "2.2k", 1e6 -> "1meg")
+function fmtSpice(v) {
+  if (!isFinite(v)) return String(v);
+  if (v === 0) return "0";
+  const pre = [[1e12, "T"], [1e9, "G"], [1e6, "meg"], [1e3, "k"], [1, ""], [1e-3, "m"], [1e-6, "u"], [1e-9, "n"], [1e-12, "p"], [1e-15, "f"]];
+  const a = Math.abs(v);
+  for (const [m, p] of pre) if (a >= m * 0.9999999) return +(v / m).toPrecision(3) + p;
+  return v.toPrecision(3);
+}
 function parseVal(s) {
   const m = String(s).trim().match(/^([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)(meg|[fpnuµmkgt])?[a-zA-Z]*$/i);
   if (!m) return NaN;
@@ -407,8 +417,20 @@ function restore(s) {
 }
 function undo() { if (!undoStack.length) return; redoStack.push(lastSnap); restore(undoStack.pop()); }
 function redo() { if (!redoStack.length) return; undoStack.push(lastSnap); restore(redoStack.pop()); }
+let autoRun = false, autoTimer = null;
+try { autoRun = localStorage.getItem("openpe-autorun") === "1"; } catch (e) { /* ignore */ }
+function scheduleAutoRun() {
+  if (!autoRun) return;
+  clearTimeout(autoTimer);
+  autoTimer = setTimeout(() => {
+    const n = buildNetlist();
+    if (n.errors.length) { setMsg("Auto-run paused: " + n.errors[0], true); return; }
+    runSim(true);
+  }, 400);
+}
 function changed(label) {
   netCache = null; opAnnot = null;
+  scheduleAutoRun();
   try { localStorage.setItem("openpe-schematic", lastSnap); } catch (e) { /* storage unavailable */ }
   render(); renderProps(); updateButtons();
   if (label) setMsg(label);
@@ -1274,6 +1296,7 @@ function renderProps() {
     if (!T.noName) h += field("name", "Name", c.props.name);
     for (const [k, label, , opts] of T.props) h += field(k, label, c.props[k], opts);
     const N = T.pins.map((p, i) => `<tr><td>${esc(p.n)}</td><td>${esc(pinNetName(c, i) === "0" ? "ground" : pinNetName(c, i))}</td></tr>`).join("");
+    h += `<p class="hint">Tune values with <kbd>↑</kbd>/<kbd>↓</kbd> (±10 %, <kbd>Shift</kbd> ×10) or the mouse wheel; turn on <b>Auto-run</b> to see results update live.</p>`;
     h += `<h4>Connections</h4><table class="op">${N}</table>`;
     h += `<h4>Arrange</h4><div style="display:flex;gap:4px;flex-wrap:wrap"><button class="btn" data-act="rot">⟳ Rotate</button>` +
       `<button class="btn" data-act="flip">⇋ Flip</button><button class="btn" data-act="dup">Duplicate</button><button class="btn" data-act="del">Delete</button></div>`;
@@ -1291,7 +1314,14 @@ function renderProps() {
         const bad = inp.tagName !== "SELECT" && !["name", "net", "num", "den", "vmax", "vmin"].includes(k) && isNaN(parseVal(inp.value));
         inp.classList.toggle("bad", bad);
       });
-      inp.addEventListener("keydown", (e) => { if (e.key === "Enter") { inp.blur(); } });
+      inp.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { inp.blur(); return; }
+        if ((e.key === "ArrowUp" || e.key === "ArrowDown") && stepField(inp, e.key === "ArrowUp" ? 1 : -1, e.shiftKey)) { e.preventDefault(); apply(); }
+      });
+      inp.addEventListener("wheel", (e) => {
+        if (document.activeElement !== inp) return;
+        if (stepField(inp, e.deltaY < 0 ? 1 : -1, e.shiftKey)) { e.preventDefault(); apply(); }
+      }, { passive: false });
     });
     el.querySelectorAll("[data-act]").forEach((b) => b.addEventListener("click", () => {
       ({ rot: () => rotateSel(1), flip: flipSel, dup: () => duplicateSelection(), del: deleteSel })[b.dataset.act]();
@@ -1304,6 +1334,16 @@ function renderProps() {
       ({ rot: () => rotateSel(1), flip: flipSel, dup: () => duplicateSelection(), del: deleteSel })[b.dataset.act]();
     }));
   } else renderSimSettings(el);
+}
+// design-time tuning: step a numeric value by ±10 % (Shift: ×10 / ÷10)
+function stepField(inp, dir, big) {
+  if (inp.tagName !== "INPUT" || ["name", "net", "num", "den"].includes(inp.dataset.k)) return false;
+  const v = parseVal(inp.value);
+  if (isNaN(v)) return false;
+  const f = big ? 10 : 1.1;
+  inp.value = fmtSpice(v === 0 ? 0.1 * dir : dir > 0 ? v * f : v / f);
+  inp.classList.remove("bad");
+  return true;
 }
 function field(k, label, v, opts) {
   if (opts) {
@@ -1464,6 +1504,12 @@ $("#bGrid").onclick = () => { snapOn = !snapOn; updateButtons(); };
 $("#bNetlist").onclick = () => { const n = buildNetlist(); download(safeTitle() + ".net", n.text, "text/plain"); showNetlistTab(n); };
 $("#bSettings").onclick = () => { sel = new Set(); cancelMode(); renderProps(); };
 $("#bRun").onclick = () => runSim();
+$("#bAuto").onclick = () => {
+  autoRun = !autoRun;
+  try { localStorage.setItem("openpe-autorun", autoRun ? "1" : "0"); } catch (e) { /* ignore */ }
+  updateButtons(); setMsg(autoRun ? "Auto-run on: the circuit re-simulates after every change" : "Auto-run off");
+  if (autoRun) scheduleAutoRun();
+};
 $("#bTheme").onclick = () => {
   const root = document.documentElement;
   const dark = root.dataset.theme ? root.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
@@ -1476,6 +1522,7 @@ function updateButtons() {
   $("#bWire").classList.toggle("on", tool === "wire");
   $("#bSelect").classList.toggle("on", tool === "select");
   $("#bGrid").classList.toggle("on", snapOn);
+  $("#bAuto").classList.toggle("on", autoRun);
   $("#stMode").textContent = { select: "Select", wire: "Wire", place: "Place" }[tool] || tool;
   svg.classList.toggle("wiring", tool === "wire" || mode.t === "wire");
 }
@@ -1492,12 +1539,16 @@ let curTab = "wave";
 document.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => { curTab = t.dataset.tab; renderTab(); }));
 function showNetlistTab(n) { curTab = "netlist"; lastNetlist = n; renderTab(); }
 let lastNetlist = null, messages = [];
-async function runSim() {
+let simRunning = false, simPending = false;
+async function runSim(quiet = false) {
+  if (simRunning) { simPending = true; return; }
   const n = buildNetlist();
   lastNetlist = n;
   messages = [...n.errors.map((x) => ["err", x]), ...n.warnings.map((x) => ["warn", x])];
   if (n.errors.length) { curTab = "msg"; renderTab(); setMsg(`Cannot run: ${n.errors[0]}`, true); return; }
   const btn = $("#bRun"); btn.disabled = true; btn.textContent = "Running…";
+  simRunning = true;
+  const keepTab = quiet && lastResults ? curTab : null;
   const t0 = performance.now();
   try {
     const resp = await fetch("/api/simulate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ netlist: n.text }) });
@@ -1509,14 +1560,18 @@ async function runSim() {
     messages.push(["ok", `Simulation finished in ${((performance.now() - t0) / 1000).toFixed(2)} s`]);
     if (res.tran && res.tran.stats) messages.push(["info", "Transient: " + Object.entries(res.tran.stats).map(([k, v]) => `${k}=${v}`).join(", ")]);
     if (res.measures) for (const [k, v] of Object.entries(res.measures)) messages.push(["info", `${k} = ${fmtEng(v)}`]);
-    curTab = res.tran ? "wave" : res.ac || res.dc ? "ac" : res.op ? "op" : "msg";
-    setMsg("Simulation finished");
+    if (res.warnings) for (const w of res.warnings) messages.push(["warn", w]);
+    curTab = keepTab && keepTab !== "msg" && keepTab !== "netlist" ? keepTab : res.tran ? "wave" : res.ac || res.dc ? "ac" : res.op ? "op" : "msg";
+    setMsg(res.warnings && res.warnings.length ? `Simulation finished with ${res.warnings.length} warning(s) (see Messages)` : "Simulation finished");
     render();
   } catch (err) {
     const offline = err instanceof TypeError || location.protocol === "file:";
     messages.push(["err", offline ? "Cannot reach the OpenPE server. Start it with:  python -m openpe editor" : String(err.message || err)]);
     curTab = "msg"; setMsg(offline ? "Server not running (python -m openpe editor)" : "Simulation failed", true);
-  } finally { btn.disabled = false; btn.textContent = "▶ Run"; renderTab(); }
+  } finally {
+    btn.disabled = false; btn.textContent = "▶ Run"; simRunning = false; renderTab();
+    if (simPending) { simPending = false; runSim(true); }
+  }
 }
 function renderTab() {
   document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("on", t.dataset.tab === curTab));

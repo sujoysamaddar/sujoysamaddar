@@ -87,6 +87,32 @@ install.
   * **Log:** messages and errors.
 * **Other:** export waveforms to CSV, and open the drag-and-drop schematic
   editor (below) from the Tools menu or toolbar.
+* **Design parameters panel:** lists every adjustable value in the open
+  netlist, grouped by element:
+  * `.param` values
+  * R/L/C values
+  * source DC, AC and SIN/SQUARE/STEP settings
+  * switch, diode, transistor and op-amp options
+  * every control-block setting (Kp, Ki, PWM frequency...)
+  * transformer and coupling values
+  * `.tran`, `.ac` and `.dc` limits
+
+  Select a value, then type a new one, drag the slider (÷10 to ×10 of the
+  original), or use `↑`/`↓` to step ±10 %. The change is written into the
+  netlist and, with **Auto-run**, re-simulated immediately. Changed values
+  are highlighted and **Reset** restores the original.
+* **Parameter sweep:** sweep the selected value over a linear or log range
+  and overlay the chosen signal for every value. The log gets a table of
+  mean, min, max and final value per run, or peak gain and bandwidth for AC
+  analyses. The design itself is not modified.
+
+Design-time parameters are also available in Python:
+
+```python
+from openpe.designparams import extract_params, find, set_param
+text = open("circuits/rlc_step.net").read()
+text = set_param(text, find(extract_params(text), "R1.value"), "22")
+```
 
 ## Drag-and-drop schematic editor
 
@@ -118,7 +144,10 @@ local server, which binds to `127.0.0.1` and only parses netlists.
   Unconnected pins are marked, and control-signal wires are drawn dashed
   in a different colour from power wires. Connecting a signal to a power
   node is reported as an error.
-* **Properties panel:** edit names and values with validation. With
+* **Properties panel:** edit names and values with validation. Tune any
+  value at design time with `↑`/`↓` (±10 %, `Shift` for ×10 / ÷10) or the
+  mouse wheel. Turn on **Auto-run** in the toolbar and the circuit
+  re-simulates after every change. With
   nothing selected it shows the analyses: transient (from initial
   conditions or the bias point), operating point, AC and DC sweep.
 * **Results:** stacked waveform plots with a cursor readout, Bode plots
@@ -347,6 +376,7 @@ openpe/
   simulator.py   MNA solver: transient (matrix caching, switch iteration, Newton), .op, .dc, .ac
   results.py     waveform analysis, plots, CSV
   analysis.py    parameter sweep, injection AC sweep, Monte Carlo, Bode helpers
+  designparams.py  find / change / sweep the numeric values of a netlist (design-time parameters)
   netlist.py     text netlist parser
   gui.py         OpenPE Studio desktop GUI (Tkinter + matplotlib)
   server.py      local web server for the schematic editor (/api/simulate)

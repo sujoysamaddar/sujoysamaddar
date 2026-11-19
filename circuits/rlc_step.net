@@ -1,0 +1,9 @@
+* Series RLC step response (underdamped)
+V1 in 0 STEP 0 0 10
+R1 in a 5
+L1 a b 1m
+C1 b 0 10u
+.tran 1u 5m
+.plot V(b) I(L1)
+.measure max V(b)
+.end

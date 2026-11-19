@@ -1,0 +1,26 @@
+* Buck converter 48 V -> 12 V with average current-mode control
+.title Buck converter (netlist)
+.param vin=48 fsw=50k
+Vin   in  0   DC {vin}
+S1    in  sw  gate
+D1    0   sw
+L1    sw  out 100u
+C1    out 0   220u
+Rload out 0   6
+* ---- control circuit
+B1 VSENSOR  vo out 0
+B2 ISENSOR  il_raw L1
+B3 ZOH      il il_raw fs={fsw}
+B4 RAMP     vref slope=6k final=12
+B5 SUM      verr vref vo signs=+-
+B6 PI       iref verr kp=0.7 ki=700 lo=0 hi=10
+B7 SUM      ierr iref il signs=+-
+B8 PI       duty ierr kp=0.065 ki=200 lo=0 hi=0.9
+B9 PWM      gate duty freq={fsw}
+.tran 0.2u 8m
+.window 1m
+.plot V(out),vref I(L1),iref duty
+.measure mean V(out)
+.measure pp V(out)
+.measure mean I(L1)
+.end

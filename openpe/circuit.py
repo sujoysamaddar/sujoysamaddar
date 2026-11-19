@@ -1,0 +1,119 @@
+"""Circuit container: a power circuit (elements) plus a control circuit (blocks)."""
+from . import control as ctl
+from . import elements as el
+
+
+class Circuit:
+    """Holds power elements and control blocks.
+
+    Elements and blocks can be added with ``add`` or the convenience methods
+    (``c.R(...)``, ``c.L(...)``, ...) which mirror a schematic editor's parts
+    palette.
+    """
+
+    def __init__(self, title="circuit"):
+        self.title = title
+        self.elements = []
+        self.blocks = []
+
+    # ------------------------------------------------------------------
+    def add(self, *items):
+        for item in items:
+            if isinstance(item, el.Element):
+                if any(e.name == item.name for e in self.elements):
+                    raise ValueError(f"duplicate element name {item.name!r}")
+                self.elements.append(item)
+            elif isinstance(item, ctl.Block):
+                taken = {o for b in self.blocks for o in b.outputs}
+                dup = taken.intersection(item.outputs)
+                if dup:
+                    raise ValueError(f"signal(s) {sorted(dup)} already driven by another block")
+                self.blocks.append(item)
+            else:
+                raise TypeError(f"cannot add {item!r}")
+        return items[0] if len(items) == 1 else items
+
+    def element(self, name):
+        for e in self.elements:
+            if e.name == name:
+                return e
+        raise KeyError(name)
+
+    def block(self, signal):
+        for b in self.blocks:
+            if signal in b.outputs:
+                return b
+        raise KeyError(signal)
+
+    def copy(self):
+        import copy
+        return copy.deepcopy(self)
+
+    def subcircuit(self, prefix, other, port_map):
+        """Insert a copy of circuit ``other`` with its node/signal names
+        prefixed by ``prefix.``.  ``port_map`` maps other's node names to
+        nodes of this circuit (e.g. {'in': 'vbus', 'out': 'load'}).  Ground
+        is always shared."""
+        import copy
+        sub = copy.deepcopy(other)
+
+        def rn(n):
+            if n in el.GROUND_NAMES:
+                return n
+            return port_map.get(n, f"{prefix}.{n}")
+
+        def rs(s):
+            return port_map.get(s, f"{prefix}.{s}")
+
+        for e in sub.elements:
+            e.name = f"{prefix}.{e.name}"
+            e.nodes = [rn(n) for n in e.nodes]
+            for attr in ("gate", "signal"):
+                if getattr(e, attr, None):
+                    setattr(e, attr, rs(getattr(e, attr)))
+            self.add(e)
+        for b in sub.blocks:
+            b.outputs = [rs(o) for o in b.outputs]
+            b.inputs = [rs(i) for i in b.inputs]
+            for attr in ("n1", "n2"):
+                if hasattr(b, attr):
+                    setattr(b, attr, rn(getattr(b, attr)))
+            if hasattr(b, "element"):
+                b.element = f"{prefix}.{b.element}"
+            self.add(b)
+
+    # ------------------------------------------------------------------
+    # Palette shortcuts
+    def R(self, name, a, b, r):
+        return self.add(el.Resistor(name, a, b, r))
+
+    def L(self, name, a, b, l, ic=0.0):
+        return self.add(el.Inductor(name, a, b, l, ic))
+
+    def C(self, name, a, b, c, ic=0.0):
+        return self.add(el.Capacitor(name, a, b, c, ic))
+
+    def V(self, name, a, b, value=0.0, **kw):
+        return self.add(el.VoltageSource(name, a, b, value, **kw))
+
+    def I(self, name, a, b, value=0.0, **kw):  # noqa: E743
+        return self.add(el.CurrentSource(name, a, b, value, **kw))
+
+    def D(self, name, a, b, **kw):
+        return self.add(el.Diode(name, a, b, **kw))
+
+    def S(self, name, a, b, gate, **kw):
+        return self.add(el.Switch(name, a, b, gate, **kw))
+
+    def SCR(self, name, a, b, gate, **kw):
+        return self.add(el.Thyristor(name, a, b, gate, **kw))
+
+    def T(self, name, p1, p2, s1, s2, n, **kw):
+        return self.add(el.Transformer(name, p1, p2, s1, s2, n, **kw))
+
+    def simulate(self, dt, t_end, **kw):
+        from .simulator import Simulator
+        return Simulator(self, dt, t_end, **kw).run()
+
+    def __repr__(self):
+        return f"Circuit({self.title!r}, {len(self.elements)} elements, {len(self.blocks)} blocks)"

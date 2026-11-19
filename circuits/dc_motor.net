@@ -1,0 +1,11 @@
+* DC motor started direct-on-line with a load torque step
+.param vdc=100
+Va  a 0 DC {vdc}
+M1  a 0 ra=1 la=5m ke=0.5 j=0.01 bf=1m tload=tl
+B1  STEP tl t_step=1 before=0 after=2
+.tran 20u 2 every=25
+.window 0.2
+.plot speed(M1) I(M1) Te(M1),tl
+.measure max I(M1)
+.measure mean rpm(M1)
+.end

@@ -14,7 +14,6 @@ if __package__ in (None, ""):
     import openpe  # noqa: F401
     __package__ = "openpe"
 
-from .netlist import load
 
 
 def _measure(res, spec):
@@ -36,6 +35,56 @@ def _measure(res, spec):
     raise ValueError(f"unknown measure {kind}")
 
 
+def _sweep(text, title, spec, window, csv_path):
+    """--sweep LABEL=START:STOP:N[:log]  ->  table of the netlist's .measure values."""
+    from .designparams import apply_overrides, format_value, sweep_values
+    from .netlist import parse
+    try:
+        label, rng = spec.split("=", 1)
+        parts = rng.split(":")
+        if len(parts) not in (3, 4):
+            raise ValueError
+        n = int(parts[2])
+        log = len(parts) == 4 and parts[3].lower().startswith("log")
+        values = sweep_values(parts[0], parts[1], n, log)
+    except ValueError as exc:
+        print(f"error: --sweep needs LABEL=START:STOP:N[:log] ({exc or 'bad format'})", file=sys.stderr)
+        return 2
+    probe = parse(text, title=title)
+    if not probe.tran or not probe.measures:
+        print("error: --sweep needs a .tran analysis and at least one .measure line to tabulate", file=sys.stderr)
+        return 2
+    rows = []
+    for v in values:
+        t2 = apply_overrides(text, [f"{label}={format_value(v)}"])
+        nl = parse(t2, title=title)
+        res = nl.run()
+        w = window or nl.window
+        mres = res.last(w) if w else res
+        row = {"value": v}
+        for m in nl.measures:
+            try:
+                row[" ".join(m)] = _measure(mres, m)
+            except Exception as exc:          # one bad measure must not abort the sweep
+                row[" ".join(m)] = float("nan")
+                print(f"warning: {' '.join(m)}: {exc}", file=sys.stderr)
+        rows.append(row)
+    cols = list(rows[0])
+    widths = [max(len(c), 12) for c in cols]
+    print(f"sweep of {label}")
+    print("  ".join(c.rjust(w) for c, w in zip(cols, widths)))
+    for r in rows:
+        print("  ".join(f"{r[c]:.6g}".rjust(w) for c, w in zip(cols, widths)))
+    if csv_path:
+        import csv
+        with open(csv_path, "w", newline="", encoding="utf-8") as fh:
+            wr = csv.writer(fh)
+            wr.writerow(cols)
+            wr.writerows([[r[c] for c in cols] for r in rows])
+        print(f"  table written to {csv_path}")
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="openpe", description="OpenPE power-electronics simulator")
     sub = ap.add_subparsers(dest="cmd")
@@ -46,6 +95,13 @@ def main(argv=None):
     r.add_argument("--csv", help="export waveforms to CSV")
     r.add_argument("--summary", action="store_true", help="print mean/rms/min/max of plotted signals")
     r.add_argument("--window", type=float, help="measure over the last N seconds only")
+    r.add_argument("--set", action="append", default=[], metavar="LABEL=VALUE",
+                   help="override a value without editing the file, e.g. --set R1.value=4.7k --set vin=24 "
+                        "(repeatable; see --list-params)")
+    r.add_argument("--list-params", action="store_true", help="list the adjustable values and exit")
+    r.add_argument("--sweep", metavar="LABEL=START:STOP:N[:log]",
+                   help="re-run for N values of a parameter and tabulate the .measure results, "
+                        "e.g. --sweep R1.value=2:50:6:log")
     sub.add_parser("blocks", help="list control block types")
     gui = sub.add_parser("gui", help="start OpenPE Studio, the desktop GUI (default)")
     gui.add_argument("netlist", nargs="?", help="netlist to open")
@@ -82,7 +138,27 @@ def main(argv=None):
         print("\n".join(sorted(BLOCK_TYPES)))
         return 0
 
-    nl = load(args.netlist)
+    from .designparams import apply_overrides, extract_params, params_table
+    from .netlist import parse
+    with open(args.netlist, encoding="utf-8") as fh:
+        text = fh.read()
+    title = os.path.splitext(os.path.basename(args.netlist))[0]
+    try:
+        if args.set:
+            text = apply_overrides(text, args.set)
+            for a in args.set:
+                print(f"  override: {a}")
+        if args.list_params:
+            print(params_table(extract_params(text)))
+            return 0
+        nl = parse(text, title=title)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    for w in nl.warnings:
+        print(f"warning: {w}", file=sys.stderr)
+    if args.sweep:
+        return _sweep(text, title, args.sweep, args.window, args.csv)
     if not nl.tran and not nl.analyses:
         print("netlist has no analysis directive (.tran, .op, .dc, .ac)", file=sys.stderr)
         return 2

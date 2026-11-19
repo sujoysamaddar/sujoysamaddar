@@ -56,6 +56,16 @@ button, input, select { font: inherit; color: inherit; }
 #svg { width: 100%; height: 100%; display: block; touch-action: none; user-select: none; outline: none; }
 #svg.placing, #svg.wiring { cursor: crosshair; }
 #svg.panning { cursor: grabbing; }
+#tuner { position: absolute; z-index: 5; width: 270px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 8px; box-shadow: 0 6px 24px rgba(0,0,0,.25); padding: 8px 10px; }
+#tuner[hidden] { display: none; }
+#tuner .th { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+#tuner .tr { display: flex; gap: 4px; align-items: center; margin: 4px 0; }
+#tuner input[type=text] { flex: 1; min-width: 0; padding: 4px 6px; border: 1px solid var(--line); border-radius: 5px; background: var(--bg); }
+#tuner input[type=text].bad { border-color: var(--err); }
+#tuner input[type=range] { width: 100%; }
+#tuner select { padding: 3px 4px; border: 1px solid var(--line); border-radius: 5px; background: var(--bg); }
+#tuner .btn { padding: 3px 8px; }
 #tip { position: absolute; pointer-events: none; background: var(--ink); color: var(--panel); padding: 2px 6px;
   border-radius: 4px; font-size: 11px; display: none; white-space: nowrap; }
 #props { grid-area: props; overflow-y: auto; background: var(--panel); border-left: 1px solid var(--line); padding: 10px; }
@@ -129,6 +139,8 @@ svg .box { fill: rgba(37, 99, 235, .08); stroke: var(--accent); stroke-dasharray
     <button class="btn" id="bGrid" title="Snap to grid (G)">Snap</button>
     <button class="btn" id="bNetlist" title="Download netlist (.net)">Netlist ⤓</button>
     <button class="btn" id="bSettings" title="Simulation settings">Analyses…</button>
+    <button class="btn" id="bStd" title="Snap resistor, capacitor and inductor values to the chosen standard series (the selection, or everything if nothing is selected)">Std values</button>
+    <select class="btn" id="bSeries" title="Standard series"><option>E6</option><option>E12</option><option selected>E24</option><option>E48</option><option>E96</option></select>
     <button class="btn" id="bAuto" title="Re-run the simulation automatically after every change">Auto-run</button>
     <button class="btn primary" id="bRun" title="Run simulation (F5 / Ctrl+Enter)">▶ Run</button>
     <span class="sep"></span>
@@ -144,6 +156,19 @@ svg .box { fill: rgba(37, 99, 235, .08); stroke: var(--accent); stroke-dasharray
   <div id="canvasWrap">
     <svg id="svg" tabindex="0" aria-label="Schematic canvas"></svg>
     <div id="tip"></div>
+    <div id="tuner" hidden>
+      <div class="th"><b id="tuTitle"></b><button class="btn" id="tuClose" title="Close (Esc)">×</button></div>
+      <select id="tuProp" style="width:100%"></select>
+      <div class="tr"><input type="text" id="tuVal" spellcheck="false" title="↑/↓: ±10 %, Shift: ×10, PageUp/PageDown: next standard value">
+        <button class="btn" id="tuReset" title="Back to the value when the tuner opened">Reset</button></div>
+      <input type="range" id="tuSlider" min="-100" max="100" step="1" value="0" title="Slide ÷10 … ×10 around the starting value">
+      <div class="tr"><span class="hint">Standard</span>
+        <select id="tuSeries"><option>E6</option><option>E12</option><option selected>E24</option><option>E48</option><option>E96</option></select>
+        <button class="btn" id="tuDn" title="Previous standard value (PageDown)">◀</button>
+        <button class="btn" id="tuUp" title="Next standard value (PageUp)">▶</button>
+        <button class="btn" id="tuSnap" title="Nearest standard value">Snap</button></div>
+      <div class="hint" id="tuInfo"></div>
+    </div>
   </div>
   <div id="props"></div>
   <div id="status"><span id="stMode">Select</span><span id="stPos"></span><span id="stInfo"></span><span id="stMsg"></span></div>
@@ -189,6 +214,27 @@ function fmtSpice(v) {
   const a = Math.abs(v);
   for (const [m, p] of pre) if (a >= m * 0.9999999) return +(v / m).toPrecision(3) + p;
   return v.toPrecision(3);
+}
+// ---- standard component values (E-series), same tables as openpe.eseries
+const E_TABLES = {
+  E6: [1.0, 1.5, 2.2, 3.3, 4.7, 6.8],
+  E12: [1.0, 1.2, 1.5, 1.8, 2.2, 2.7, 3.3, 3.9, 4.7, 5.6, 6.8, 8.2],
+  E24: [1.0, 1.1, 1.2, 1.3, 1.5, 1.6, 1.8, 2.0, 2.2, 2.4, 2.7, 3.0, 3.3, 3.6, 3.9, 4.3, 4.7, 5.1, 5.6, 6.2, 6.8, 7.5, 8.2, 9.1],
+  E48: Array.from({ length: 48 }, (_, k) => +Math.pow(10, k / 48).toFixed(2)),
+  E96: Array.from({ length: 96 }, (_, k) => +Math.pow(10, k / 96).toFixed(2)),
+};
+function eSplit(v) { let d = Math.floor(Math.log10(v)); let m = v / Math.pow(10, d); if (m >= 10 - 1e-12) { d++; m /= 10; } return [d, m]; }
+function eJoin(m, d) { return +(m * Math.pow(10, d)).toPrecision(6); }
+function eNearest(v, s) {
+  const t = E_TABLES[s].concat([10]); const [d, m] = eSplit(v);
+  let best = t[0]; for (const x of t) if (Math.abs(Math.log(x / m)) < Math.abs(Math.log(best / m))) best = x;
+  return eJoin(best, d);
+}
+function eStep(v, dir, s) {
+  const t = E_TABLES[s]; const [d, m] = eSplit(v);
+  if (dir > 0) { for (const x of t) if (x > m * (1 + 1e-9)) return eJoin(x, d); return eJoin(t[0], d + 1); }
+  for (let i = t.length - 1; i >= 0; i--) if (t[i] < m * (1 - 1e-9)) return eJoin(t[i], d);
+  return eJoin(t[t.length - 1], d - 1);
 }
 function parseVal(s) {
   const m = String(s).trim().match(/^([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)(meg|[fpnuµmkgt])?[a-zA-Z]*$/i);
@@ -247,11 +293,11 @@ const blk = (text, ins, outs, o) => Object.assign({
 
 const TYPES = {
   // ---------------- passive
-  R: two({ cat: "Passive", title: "Resistor", prefix: "R", svg: SYM.res, props: [["value", "Resistance", "1k"], ["plotI", "Plot current", "no", "yes|no"]],
+  R: two({ cat: "Passive", title: "Resistor", prefix: "R", svg: SYM.res, props: [["value", "Resistance", "1k"], ["plotI", "Plot current", "no", "yes|no"], ["chgT", "Change at time", ""], ["chgV", "Change to", ""]],
     show: (p) => p.value, emit: (c, N, p) => [`${nm(c, "R")} ${N[0]} ${N[1]} ${p.value}`] }),
-  L: two({ cat: "Passive", title: "Inductor", prefix: "L", svg: SYM.ind, props: [["value", "Inductance", "100u"], ["ic", "Initial current", "0"], ["plotI", "Plot current", "no", "yes|no"]],
+  L: two({ cat: "Passive", title: "Inductor", prefix: "L", svg: SYM.ind, props: [["value", "Inductance", "100u"], ["ic", "Initial current", "0"], ["plotI", "Plot current", "no", "yes|no"], ["chgT", "Change at time", ""], ["chgV", "Change to", ""]],
     show: (p) => p.value, emit: (c, N, p) => [`${nm(c, "L")} ${N[0]} ${N[1]} ${p.value}` + (parseVal(p.ic) ? ` ic=${p.ic}` : "")] }),
-  C: two({ cat: "Passive", title: "Capacitor", prefix: "C", svg: SYM.cap, props: [["value", "Capacitance", "10u"], ["ic", "Initial voltage", "0"], ["plotI", "Plot current", "no", "yes|no"]],
+  C: two({ cat: "Passive", title: "Capacitor", prefix: "C", svg: SYM.cap, props: [["value", "Capacitance", "10u"], ["ic", "Initial voltage", "0"], ["plotI", "Plot current", "no", "yes|no"], ["chgT", "Change at time", ""], ["chgV", "Change to", ""]],
     show: (p) => p.value, emit: (c, N, p) => [`${nm(c, "C")} ${N[0]} ${N[1]} ${p.value}` + (parseVal(p.ic) ? ` ic=${p.ic}` : "")] }),
   T: { cat: "Passive", title: "Transformer", prefix: "T", svg: SYM.xfmr, bbox: [-30, -26, 30, 24], label: [0, -32],
     pins: [P(-30, -20, "p1"), P(-30, 20, "p2"), P(30, -20, "s1"), P(30, 20, "s2")],
@@ -259,7 +305,7 @@ const TYPES = {
     show: (p) => `${p.n}:1`,
     emit: (c, N, p) => [`${nm(c, "T")} ${N[0]} ${N[1]} ${N[2]} ${N[3]} ${p.n}` + (parseVal(p.lm) ? ` lm=${p.lm}` : "") + (parseVal(p.llk) ? ` llk=${p.llk}` : "")] },
   // ---------------- sources
-  V: vert({ cat: "Sources", title: "DC voltage", prefix: "V", svg: SYM.vdc, props: [["dc", "Voltage", "12"], ["ac", "AC magnitude", "0"], ["plotI", "Plot current", "no", "yes|no"]],
+  V: vert({ cat: "Sources", title: "DC voltage", prefix: "V", svg: SYM.vdc, props: [["dc", "Voltage", "12"], ["ac", "AC magnitude", "0"], ["plotI", "Plot current", "no", "yes|no"], ["chgT", "Change at time", ""], ["chgV", "Change to", ""]],
     show: (p) => p.dc + "V", emit: (c, N, p) => [`${nm(c, "V")} ${N[0]} ${N[1]} DC ${p.dc}` + (parseVal(p.ac) ? ` AC ${p.ac}` : "")] }),
   VSIN: vert({ cat: "Sources", title: "Sine voltage", prefix: "V", svg: SYM.vsin,
     props: [["amp", "Amplitude", "10"], ["freq", "Frequency", "50"], ["phase", "Phase (deg)", "0"], ["offset", "Offset", "0"], ["ac", "AC magnitude", "1"], ["plotI", "Plot current", "no", "yes|no"]],
@@ -269,7 +315,7 @@ const TYPES = {
     props: [["v1", "Low", "0"], ["v2", "High", "5"], ["freq", "Frequency", "1k"], ["duty", "Duty", "0.5"]],
     show: (p) => `${p.v1}/${p.v2}V ${p.freq}Hz`,
     emit: (c, N, p) => [`${nm(c, "V")} ${N[0]} ${N[1]} DC ${p.v1} SQUARE ${p.v1} ${p.v2} ${p.freq} ${p.duty}`] }),
-  I: Object.assign(vert({ cat: "Sources", title: "DC current", prefix: "I", svg: SYM.idc, props: [["dc", "Current", "1m"], ["ac", "AC magnitude", "0"]],
+  I: Object.assign(vert({ cat: "Sources", title: "DC current", prefix: "I", svg: SYM.idc, props: [["dc", "Current", "1m"], ["ac", "AC magnitude", "0"], ["chgT", "Change at time", ""], ["chgV", "Change to", ""]],
     show: (p) => p.dc + "A", emit: (c, N, p) => [`${nm(c, "I")} ${N[1]} ${N[0]} DC ${p.dc}` + (parseVal(p.ac) ? ` AC ${p.ac}` : "")] }),
     { pins: [P(0, -30, "out"), P(0, 30, "in")] }),
   // ---------------- semiconductors
@@ -401,6 +447,7 @@ let lastResults = null;
 
 const snapshot = () => JSON.stringify({ comps: doc.comps, wires: doc.wires, sim: doc.sim, nextId: doc.nextId });
 function commit(label) {
+  if (typeof forgetPress === "function") forgetPress();
   undoStack.push(lastSnap);
   if (undoStack.length > 300) undoStack.shift();
   redoStack = [];
@@ -617,11 +664,16 @@ function buildNetlist() {
     for (const [k, label, , opts] of T.props) {
       const v = String(c.props[k]);
       if (opts || ["num", "den", "signs", "carrier", "net"].includes(k)) continue;
+      if ((k === "chgT" || k === "chgV") && v.trim() === "") continue;
       if (k === "vmax" || k === "vmin") { if (v !== "" && isNaN(parseVal(v))) errors.push(`${c.props.name}: ${label} "${v}" is not a number`); continue; }
       if (isNaN(parseVal(v))) errors.push(`${c.props.name}: ${label} "${v}" is not a number`);
     }
     const N = T.pins.map((p, i) => pinNetName(c, i));
-    lines.push(...T.emit(c, N, c.props));
+    const emitted = T.emit(c, N, c.props);
+    lines.push(...emitted);
+    const hasT = String(c.props.chgT || "").trim() !== "", hasV = String(c.props.chgV || "").trim() !== "";
+    if (hasT !== hasV) errors.push(`${c.props.name}: fill in both "Change at time" and "Change to" (or leave both empty)`);
+    else if (hasT) lines.push(`.change ${c.props.chgT.trim()} ${emitted[0].split(/\s+/)[0]} ${c.props.chgV.trim()}`);
     if (c.type === "PROBE") {
       const r = nets.pinNet.get(c.id + ":0");
       const nn = nets.names.get(r);
@@ -868,7 +920,13 @@ function isEndpointTarget(x, y) {
   return !!wireAt(x, y);
 }
 
+let lastPress = { t: 0, x: 0, y: 0, id: null };
+const forgetPress = () => { lastPress = { t: 0, x: 0, y: 0, id: null }; };
+// anything between two presses (a key, a press elsewhere, an edit) means it is not a double-click
+document.addEventListener("pointerdown", (e) => { if (e.target !== svg && !svg.contains(e.target)) forgetPress(); }, true);
+document.addEventListener("keydown", forgetPress, true);
 svg.addEventListener("pointerdown", (e) => {
+  closeTuner();
   svg.focus();
   const [wx, wy] = worldFromEvent(e);
   const sx = snap(wx), sy = snap(wy);
@@ -903,6 +961,17 @@ svg.addEventListener("pointerdown", (e) => {
   const c = hitComp(wx, wy);
   const wh = c ? null : hitWire(wx, wy);
   const id = c ? c.id : wh ? wh.w.id : null;
+  // Double-click detection from the pointer presses themselves: the canvas is redrawn on the first
+  // press, which detaches the element the browser tracks, so a native "dblclick" is never delivered.
+  const now = performance.now();
+  const isDouble = !!c && lastPress.id === c.id && now - lastPress.t < 450 && Math.hypot(e.clientX - lastPress.x, e.clientY - lastPress.y) < 8;
+  lastPress = { t: now, x: e.clientX, y: e.clientY, id: c ? c.id : null };
+  if (isDouble && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
+    lastPress = { t: 0, x: 0, y: 0, id: null };
+    sel = new Set([c.id]); render(); renderProps();
+    if (!openTuner(c)) { const f = $("#props input[type=text]"); if (f) { f.focus(); f.select(); } }
+    return;
+  }
   if (!id) {
     if (!e.shiftKey) sel = new Set();
     mode = { t: "box", start: [wx, wy], cur: [wx, wy], add: e.shiftKey, base: new Set(sel) };
@@ -1037,7 +1106,9 @@ svg.addEventListener("dblclick", (e) => {
   if (mode.t === "wire") return;
   const [wx, wy] = worldFromEvent(e);
   const c = hitComp(wx, wy);
-  if (c) { sel = new Set([c.id]); render(); renderProps(); const f = $("#props input[type=text]"); if (f) { f.focus(); f.select(); } }
+  if (!c || (tuner && tuner.id === c.id)) return;
+  sel = new Set([c.id]); render(); renderProps();
+  if (!openTuner(c)) { const f = $("#props input[type=text]"); if (f) { f.focus(); f.select(); } }
 });
 svg.addEventListener("contextmenu", (e) => {
   e.preventDefault();
@@ -1243,6 +1314,7 @@ document.addEventListener("keydown", (e) => {
   const mod = e.ctrlKey || e.metaKey;
   if (mod && e.key.toLowerCase() === "s") { e.preventDefault(); saveFile(); return; }
   if ((mod && e.key === "Enter") || e.key === "F5") { e.preventDefault(); runSim(); return; }
+  if (e.key === "Escape" && tuner) { closeTuner(); svg.focus(); return; }
   if (inField) { if (e.key === "Escape") document.activeElement.blur(); return; }
   if (e.key === " ") { spaceDown = true; e.preventDefault(); return; }
   if (mod && e.key.toLowerCase() === "z") { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
@@ -1311,7 +1383,8 @@ function renderProps() {
       };
       inp.addEventListener(inp.tagName === "SELECT" ? "change" : "change", apply);
       inp.addEventListener("input", () => {
-        const bad = inp.tagName !== "SELECT" && !["name", "net", "num", "den", "vmax", "vmin"].includes(k) && isNaN(parseVal(inp.value));
+        const optional = ["chgT", "chgV"].includes(k) && inp.value.trim() === "";
+        const bad = inp.tagName !== "SELECT" && !optional && !["name", "net", "num", "den", "vmax", "vmin"].includes(k) && isNaN(parseVal(inp.value));
         inp.classList.toggle("bad", bad);
       });
       inp.addEventListener("keydown", (e) => {
@@ -1338,6 +1411,7 @@ function renderProps() {
 // design-time tuning: step a numeric value by ±10 % (Shift: ×10 / ÷10)
 function stepField(inp, dir, big) {
   if (inp.tagName !== "INPUT" || ["name", "net", "num", "den"].includes(inp.dataset.k)) return false;
+  if (inp.value.trim() === "") return false;
   const v = parseVal(inp.value);
   if (isNaN(v)) return false;
   const f = big ? 10 : 1.1;
@@ -1504,6 +1578,97 @@ $("#bGrid").onclick = () => { snapOn = !snapOn; updateButtons(); };
 $("#bNetlist").onclick = () => { const n = buildNetlist(); download(safeTitle() + ".net", n.text, "text/plain"); showNetlistTab(n); };
 $("#bSettings").onclick = () => { sel = new Set(); cancelMode(); renderProps(); };
 $("#bRun").onclick = () => runSim();
+// ---- quick value tuner: double-click a part
+let tuner = null;
+const TUNER_SKIP = ["name", "net", "num", "den", "signs", "carrier", "chgT", "chgV", "plotI", "ic"];
+function tunerProps(c) {
+  return TYPES[c.type].props.filter(([k, , , opts]) => !opts && !TUNER_SKIP.includes(k) && !isNaN(parseVal(c.props[k])));
+}
+function closeTuner() { if (tuner) { $("#tuner").hidden = true; tuner = null; } }
+function openTuner(c) {
+  const props = tunerProps(c);
+  if (!props.length) return false;
+  tuner = { id: c.id, key: props[0][0], base: 1, start: "" };
+  $("#tuTitle").textContent = `${TYPES[c.type].title} ${c.props.name || ""}`.trim();
+  const sel = $("#tuProp");
+  sel.innerHTML = props.map(([k, label]) => `<option value="${k}">${esc(label)}</option>`).join("");
+  sel.style.display = props.length > 1 ? "" : "none";
+  tunerLoad();
+  const box = $("#tuner"), wrap = $("#canvasWrap").getBoundingClientRect();
+  box.hidden = false;
+  const x = (c.x - view.x) * view.k + 24, y = (c.y - view.y) * view.k + 24;
+  box.style.left = Math.max(4, Math.min(x, wrap.width - box.offsetWidth - 4)) + "px";
+  box.style.top = Math.max(4, Math.min(y, wrap.height - box.offsetHeight - 4)) + "px";
+  const f = $("#tuVal"); f.focus(); f.select();
+  return true;
+}
+function tunerLoad() {
+  const c = findComp(tuner.id);
+  tuner.key = $("#tuProp").value || tuner.key;
+  tuner.start = String(c.props[tuner.key]);
+  tuner.base = parseVal(tuner.start);
+  $("#tuVal").value = tuner.start; $("#tuVal").classList.remove("bad");
+  $("#tuSlider").value = 0;
+  tunerInfo();
+}
+function tunerInfo() {
+  const v = parseVal($("#tuVal").value), s = $("#tuSeries").value;
+  $("#tuInfo").textContent = v > 0 ? `nearest ${s}: ${fmtSpice(eNearest(v, s))} (${(100 * (eNearest(v, s) - v) / v).toFixed(2)} %)`
+    : "standard values need a positive number";
+}
+function tunerApply(text, final) {
+  if (!tuner) return;
+  const c = findComp(tuner.id); if (!c) { closeTuner(); return; }
+  const v = parseVal(text);
+  $("#tuVal").classList.toggle("bad", isNaN(v));
+  if (isNaN(v)) return;
+  if (String(c.props[tuner.key]) === text && !final) return;
+  c.props[tuner.key] = text;
+  if (final) commit(); else { netCache = null; opAnnot = null; render(); scheduleAutoRun(); }
+  tunerInfo();
+}
+function tunerSet(text, final = true) { $("#tuVal").value = text; tunerApply(text, final); }
+$("#tuVal").addEventListener("input", () => tunerApply($("#tuVal").value.trim(), false));
+$("#tuVal").addEventListener("change", () => tunerApply($("#tuVal").value.trim(), true));
+$("#tuVal").addEventListener("keydown", (e) => {
+  const v = parseVal($("#tuVal").value), s = $("#tuSeries").value;
+  if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+    e.preventDefault(); if (isNaN(v)) return;
+    const f = e.shiftKey ? 10 : 1.1;
+    tunerSet(fmtSpice(v === 0 ? (e.key === "ArrowUp" ? 0.1 : -0.1) : e.key === "ArrowUp" ? v * f : v / f));
+  } else if ((e.key === "PageUp" || e.key === "PageDown") && v > 0) {
+    e.preventDefault(); tunerSet(fmtSpice(eStep(v, e.key === "PageUp" ? 1 : -1, s)));
+  } else if (e.key === "Escape") { e.stopPropagation(); closeTuner(); svg.focus(); }
+});
+$("#tuSlider").addEventListener("input", () => {
+  const k = +$("#tuSlider").value / 100;
+  tunerApply(fmtSpice(tuner.base === 0 ? k * 10 : tuner.base * Math.pow(10, k)), false);
+  const c = findComp(tuner.id); if (c) $("#tuVal").value = c.props[tuner.key];
+});
+$("#tuSlider").addEventListener("change", () => { const c = findComp(tuner.id); if (c) tunerApply(String(c.props[tuner.key]), true); });
+$("#tuProp").addEventListener("change", tunerLoad);
+$("#tuSeries").addEventListener("change", tunerInfo);
+$("#tuUp").onclick = () => { const v = parseVal($("#tuVal").value); if (v > 0) tunerSet(fmtSpice(eStep(v, 1, $("#tuSeries").value))); };
+$("#tuDn").onclick = () => { const v = parseVal($("#tuVal").value); if (v > 0) tunerSet(fmtSpice(eStep(v, -1, $("#tuSeries").value))); };
+$("#tuSnap").onclick = () => { const v = parseVal($("#tuVal").value); if (v > 0) tunerSet(fmtSpice(eNearest(v, $("#tuSeries").value))); };
+$("#tuReset").onclick = () => { tunerSet(tuner.start); $("#tuSlider").value = 0; };
+$("#tuClose").onclick = () => { closeTuner(); svg.focus(); };
+
+// ---- snap component values to a standard series
+$("#bStd").onclick = () => {
+  const series = $("#bSeries").value;
+  const pool = sel.size ? doc.comps.filter((c) => sel.has(c.id)) : doc.comps;
+  const rows = [];
+  for (const c of pool.filter((c) => ["R", "C", "L"].includes(c.type))) {
+    const v = parseVal(c.props.value);
+    if (!(v > 0)) continue;
+    const n = eNearest(v, series);
+    if (Math.abs(n - v) > 1e-9 * v) { const old = c.props.value; c.props.value = fmtSpice(n); rows.push(`${c.props.name}: ${old} → ${c.props.value} (${(100 * (n - v) / v).toFixed(2)} %)`); }
+  }
+  if (!rows.length) { setMsg(`All resistor/capacitor/inductor values are already ${series} values`); return; }
+  messages = [["ok", `Snapped to ${series}:`], ...rows.map((r) => ["info", r])];
+  commit(`Snapped ${rows.length} value(s) to ${series}`);
+};
 $("#bAuto").onclick = () => {
   autoRun = !autoRun;
   try { localStorage.setItem("openpe-autorun", autoRun ? "1" : "0"); } catch (e) { /* ignore */ }
@@ -1597,7 +1762,8 @@ function renderTab() {
     if (!r || !r.tran) { body.innerHTML = '<p class="hint">Place <b>Probe</b> parts (or set “Plot current”), enable Transient and press ▶ Run.</p>'; return; }
     body.innerHTML = "";
     const names = Object.keys(r.tran.signals);
-    names.forEach((n, i) => addPlot(body, r.tran.t, [{ name: n, data: r.tran.signals[n], color: COLORS[i % COLORS.length] }], { xunit: "s", yunit: n.startsWith("I(") ? "A" : n.startsWith("V(") ? "V" : "" }));
+    names.forEach((n, i) => addPlot(body, r.tran.t, [{ name: n, data: r.tran.signals[n], color: COLORS[i % COLORS.length] }], { xunit: "s", yunit: n.startsWith("I(") ? "A" : n.startsWith("V(") ? "V" : "",
+      marks: (r.changes || []).map((c) => ({ x: c.t, label: `${c.target} → ${fmtEng(c.value)}` })) }));
     return;
   }
   if (curTab === "ac") {
@@ -1657,6 +1823,16 @@ function addPlot(parent, x, series, opt) {
       for (const v of niceTicks(x0, x1, 8)) { g.beginPath(); g.moveTo(X(v), T); g.lineTo(X(v), T + ph); g.stroke(); g.fillText(fmtEng(v, opt.xunit), X(v), T + ph + 4); }
     }
     g.strokeStyle = muted; g.strokeRect(L, T, pw, ph);
+    if (opt.marks) {                       // scheduled value changes
+      g.save(); g.setLineDash([4, 3]); g.strokeStyle = muted; g.fillStyle = muted; g.font = "10px system-ui, sans-serif";
+      for (const m of opt.marks) {
+        const mx = X(fx(m.x));
+        if (!(mx >= L && mx <= L + pw)) continue;
+        g.beginPath(); g.moveTo(mx, T); g.lineTo(mx, T + ph); g.stroke();
+        g.save(); g.translate(mx - 3, T + ph - 4); g.rotate(-Math.PI / 2); g.textAlign = "left"; g.fillText(m.label, 0, 0); g.restore();
+      }
+      g.restore();
+    }
     g.save(); g.beginPath(); g.rect(L, T, pw, ph); g.clip();
     for (const s of series) {
       g.strokeStyle = s.color; g.lineWidth = 1.5; g.beginPath();
@@ -1722,6 +1898,7 @@ window.OpenPE = {
   get doc() { return doc; }, TYPES, buildNetlist, computeNets, loadDoc, runSim, placeAt, pinsOf,
   get view() { return view; }, worldToScreen: (x, y) => { const r = svg.getBoundingClientRect(); return [r.left + (x - view.x) * view.k, r.top + (y - view.y) * view.k]; },
   get results() { return lastResults; }, undo, redo, get selection() { return [...sel]; }, EXAMPLES,
+  eNearest, eStep, E_TABLES, openTuner, get tunerOpen() { return !!tuner; }, parseVal, fmtSpice,
 };
 </script>
 </body>

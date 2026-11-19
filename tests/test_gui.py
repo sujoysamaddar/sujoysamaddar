@@ -151,3 +151,68 @@ def test_script_and_simulation_busy_states_are_independent(app):
     app.run_netlist()                                     # must not be blocked by the script
     _pump(app, lambda: app.result is not None and not app.sim_busy)
     _pump(app, lambda: not app.script_busy, timeout=120)
+
+
+def test_standard_value_buttons_and_snap(app):
+    app.select_param("R1.value")
+    app.series_var.set("E24")
+    app.p_value.set("4.6k")
+    app.std_snap()                                        # nearest E24 value, applied to the netlist
+    assert "R1 in a 4.7k" in app.text.get("1.0", "end")
+    app.std_step(+1)                                      # 4.7k -> 5.1k
+    assert app.p_value.get() == "5.1k" and "R1 in a 5.1k" in app.text.get("1.0", "end")
+    app.std_step(-1)
+    app.std_step(-1)                                      # 5.1k -> 4.7k -> 4.3k
+    assert "R1 in a 4.3k" in app.text.get("1.0", "end")
+    app.series_var.set("E96")
+    app.std_step(+1)                                      # 4.3k is not an E96 value: next one up is 4.32k
+    assert app.p_value.get() == "4.32k"
+    app.std_step(+1)
+    assert app.p_value.get() == "4.42k"
+    _pump(app, lambda: not app.sim_busy and app._autorun_job is None)
+
+
+def test_snap_whole_design_and_undo(app):
+    app.autorun.set(False)
+    app.set_text("V1 a 0 DC 5\nR1 a b 4.6k\nC1 b 0 12.3n\nL1 b 0 5.2u\n.op\n")
+    app.snap_dialog("E24", "RC")
+    txt = app.text.get("1.0", "end")
+    assert "R1 a b 4.7k" in txt and "C1 b 0 12n" in txt and "L1 b 0 5.2u" in txt
+    assert "R1.value" in app.nominal and app.nominal["R1.value"] == "4.6k"      # original values remembered
+    assert "snapped to E24" in app.log.get("1.0", "end")
+    app.text.edit_undo()                                                # a single Ctrl+Z restores everything
+    restored = app.text.get("1.0", "end")
+    assert "R1 a b 4.6k" in restored and "C1 b 0 12.3n" in restored
+
+
+def test_value_edit_is_one_undo_step(app):
+    app.autorun.set(False)
+    app.select_param("R1.value")
+    app.p_value.set("22")
+    app.apply_param()
+    assert "R1 in a 22" in app.text.get("1.0", "end")
+    app.text.edit_undo()
+    assert "R1 in a 5" in app.text.get("1.0", "end") and "R1 in a 22" not in app.text.get("1.0", "end")
+
+
+def test_scheduled_change_is_inserted_validated_and_marked_on_the_plot(app, monkeypatch):
+    shown = []
+    monkeypatch.setattr("openpe.gui.messagebox.showerror", lambda title, msg, **kw: shown.append(msg))
+    app.autorun.set(False)
+    app.schedule_change("2m R1 20")
+    txt = app.text.get("1.0", "end")
+    assert ".change 2m R1 20" in txt
+    assert txt.index(".change 2m R1 20") < txt.index(".tran")           # inserted before the analysis lines
+    labels = {app.ptree.item(i, "text") for g in app.ptree.get_children() for i in app.ptree.get_children(g)}
+    assert "time" in labels                                             # .change shows up as a design parameter
+    app.run_netlist()
+    _pump(app, lambda: app.result is not None and not app.busy)
+    assert app.result["changes"][0]["target"] == "R1"
+    assert any(ln.get_linestyle() == "--" for ax in app.fig_w.axes for ln in ax.lines)   # change marker drawn
+    n = len(app.result["changes"])
+    app.schedule_change("1m NOPE 5")                                    # unknown target: rejected, not inserted
+    assert ".change 1m NOPE 5" not in app.text.get("1.0", "end")
+    assert shown and "unknown target 'NOPE'" in shown[0]
+    app.run_netlist()
+    _pump(app, lambda: not app.busy)
+    assert len(app.result["changes"]) == n

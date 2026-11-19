@@ -71,7 +71,7 @@ def simulate_netlist(text, max_points=4000):
     plot_names = [n for g in nl.plots for n in g]
     warnings = list(nl.warnings)
     out = {"ok": True, "version": __version__, "title": nl.circuit.title, "plots": plot_names,
-           "warnings": warnings}
+           "warnings": warnings, "changes": [c.to_dict() for c in nl.circuit.changes]}
 
     def plotted(res, default):
         missing = [n for n in plot_names if n not in res]

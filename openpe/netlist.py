@@ -39,6 +39,8 @@ Control blocks:
 Directives:
 
     .tran dt t_end [method=trap|be] [start=t] [every=n] [init=ic|op]
+    .change time target value      (change a component/block value at a simulation time;
+    .change time target key=value   e.g. '.change 5m RL 2'  or  '.change 0.3 M1 tload=4')
     .op                            (DC operating point)
     .dc Vsrc start stop step       (DC sweep of an independent source)
     .ac dec|oct|lin n fstart fstop (AC small-signal analysis)
@@ -55,6 +57,7 @@ import re
 import numpy as np
 
 from . import control as ctl
+from .changes import ValueChange
 from . import devices as dv
 from . import elements as el
 from . import waveforms as wf
@@ -263,6 +266,15 @@ def parse(text, title=None):
                     if "init" in kw:
                         tran["initial"] = kw["init"].lower()   # 'ic' (default) or 'op'
 
+                elif d == ".change":
+                    pos, kw = _kv(tok[1:])
+                    if len(pos) < 2 or (len(pos) < 3 and not kw):
+                        raise ValueError("expected '.change time target value' or '.change time target key=value'")
+                    t_chg, target = parse_value(pos[0]), pos[1]
+                    if len(pos) >= 3:
+                        c.changes.append(ValueChange(t_chg, target, None, parse_value(pos[2])))
+                    for k, v in kw.items():
+                        c.changes.append(ValueChange(t_chg, target, k, _num(v)))
                 elif d == ".op":
                     analyses.append(("op",))
                 elif d == ".dc":
@@ -348,7 +360,9 @@ def parse(text, title=None):
                 c.add(el.ThreePhaseSource(head, *pos[:4], parse_value(pos[4]), parse_value(pos[5]),
                                           *(parse_value(p) for p in pos[6:7])))
             elif kind == "B":
-                c.add(_parse_block(pos, kw))
+                blk = _parse_block(pos, kw)
+                blk.netname = head
+                c.add(blk)
             else:
                 raise ValueError(f"unknown element type {head!r}")
         except (IndexError, KeyError, ValueError, TypeError) as exc:

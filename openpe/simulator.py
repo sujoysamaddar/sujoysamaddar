@@ -121,6 +121,8 @@ class Simulator:
         self.self_commutated = [e for e in self.switching if type(e).violation is not el._Switching.violation]
 
         self.blocks = self._order_blocks(self.circuit.blocks)
+        from .changes import resolve_changes
+        self._events = resolve_changes(self.circuit.changes, prims, self.circuit.blocks)
         self.direct = [b for b in self.blocks if b.feedthrough]
         self.delayed = [b for b in self.blocks if not b.feedthrough]
 
@@ -167,7 +169,7 @@ class Simulator:
     def _new_stats(self):
         self._cache = OrderedDict()
         self.stats = {"steps": 0, "factorizations": 0, "nonconverged": 0, "damped_steps": 0,
-                      "ambiguous_steps": 0, "newton_iterations": 0, "substepped": 0}
+                      "ambiguous_steps": 0, "newton_iterations": 0, "substepped": 0, "value_changes": 0}
 
     def _matrix(self, key, ctx, want_inv):
         """Linear part of the MNA matrix for a switch-state key (cached),
@@ -365,6 +367,20 @@ class Simulator:
             raise RuntimeError("DC operating point did not converge")
         return x, key
 
+    def _apply_due(self, t_from):
+        """Apply scheduled value changes whose time is <= t_from (the start of
+        the step about to be solved).  Matrices depend on component values, so
+        the cache is dropped when anything changed."""
+        n = 0
+        while self._pending and self._pending[0][0] <= t_from + 1e-9 * self.dt:
+            _, obj, attr, value, _ = self._pending.pop(0)
+            from .changes import set_attr
+            set_attr(obj, attr, value)
+            n += 1
+        if n:
+            self._cache.clear()
+            self.stats["value_changes"] += n
+
     def _prepare(self):
         """Fresh context with initialised elements and control blocks."""
         self._new_stats()
@@ -484,6 +500,8 @@ class Simulator:
     def run(self, progress=False):
         t0 = time.perf_counter()
         ctx = self._prepare()
+        self._pending = list(self._events)
+        self._apply_due(0.0)                  # changes scheduled at t <= 0 act on the initial state
         if self.initial == "op":
             x = self._operating_point(ctx)
             ctx.method = self.method
@@ -515,6 +533,7 @@ class Simulator:
         next_report = 0.1
         for n in range(1, n_steps + 1):
             ctx.t = n * self.dt
+            self._apply_due(ctx.t - self.dt)
             for e in self.gated:
                 e.set_gate(ctx)
             # first step uses backward Euler: initial capacitor currents /
@@ -565,6 +584,7 @@ class Simulator:
             "dt": self.dt,
             "element_nodes": {e.name: e.nodes for e in self.elements},
             "stats": dict(self.stats),
+            "changes": [c.to_dict() for c in self.circuit.changes],
         }
         return Results(np.array(rec_t), data, meta)
 

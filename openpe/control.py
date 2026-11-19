@@ -14,6 +14,7 @@ import numpy as np
 
 class Block:
     feedthrough = True
+    netname = None            # name used in a netlist ('B4'), set by the parser
 
     def __init__(self, out, inputs=()):
         self.outputs = [out] if isinstance(out, str) else list(out)

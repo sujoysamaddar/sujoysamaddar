@@ -114,6 +114,70 @@ text = open("circuits/rlc_step.net").read()
 text = set_param(text, find(extract_params(text), "R1.value"), "22")
 ```
 
+## Changing values
+
+There are five ways to change a value, from the design stage to the middle of a simulation.
+
+**1. During the simulation (`.change`, `Circuit.at`).** Change a component or control-block value
+at a chosen time, with no extra switches or sources. A load step is one line:
+
+```text
+.change 4m Rload 3                 ; the load resistor becomes 3 ohm at 4 ms
+.change 7m vref 9                  ; control signal 'vref' (a CONST block) steps to 9
+.change 0.3 M1 tload=4             ; DC-motor load torque, by parameter name
+```
+
+```python
+c.at(4e-3, "Rload", 3.0)           # same thing from Python
+c.at(2e-3, "V1", freq=2e3)         # any parameter: here the frequency of a sine source
+c.set_value("R1", 4.7e3)           # or change a value right now, before simulating
+```
+
+Targets are element names (`R1`, `V1`, `M1`, `T1_Lm`...) or control blocks, named by their
+output signal or by their netlist name (`B4`). A change takes effect from the first time step
+that starts at or after its time. Waveform plots (Studio, the browser editor and `Results.plot`)
+mark where values changed. Unknown targets or parameters, and invalid values such as a
+resistor ≤ 0, are rejected before the run starts, with the list of valid names.
+
+**2. Standard component values (E-series).** `openpe.eseries` implements E6, E12, E24, E48 and E96:
+
+```python
+from openpe import eseries
+eseries.nearest(4.6e3, "E24")      # 4700.0
+eseries.step(4.7e3, +1, "E24")     # 5100.0  (next standard value up)
+eseries.step(4.7e3, -1, "E96")     # 4640.0
+```
+
+`designparams.snap_to_series(text, "E24", "RC")` snaps every R and C in a netlist and reports the
+error each snap makes. Example 14 shows how a 1.59 kΩ resistor becomes 1.6 kΩ (E24, −0.5 % on
+the cut-off) or 1.5 kΩ (E12, +6 %).
+
+**3. Without editing the file (command line).**
+
+```bash
+python -m openpe run circuits/load_step.net --list-params            # what can be changed
+python -m openpe run circuits/load_step.net --set Rload.value=4 --set .tran."stop time"=6m
+python -m openpe run circuits/rlc_step.net --sweep R1.value=2:50:6:log --csv sweep.csv
+```
+
+`--set LABEL=VALUE` is repeatable. A mistyped label gets suggestions ("did you mean:
+R1.value..."). `--sweep LABEL=START:STOP:N[:log]` re-runs the circuit for each value and
+tabulates the netlist's `.measure` lines.
+
+**4. OpenPE Studio.** The Design parameters panel (value box, slider, ±10 % stepping, sweep) has
+a **Standard values** row with previous / next / Snap buttons for the E-series of your choice.
+**Tools → Snap R / C / L values to a standard series** converts the whole design in one step
+(one Ctrl+Z undoes it), and **Tools → Schedule a value change** inserts a validated
+`.change` line. The `.change` times and values are themselves tunable parameters.
+
+**5. Browser schematic editor.** Double-click any part for a quick tuner next to it: a value box,
+a ÷10…×10 slider, ◀ ▶ to step through standard values, **Snap**, and Reset. Turn on **Auto-run**
+and the waveforms update while you drag the slider. Resistors, capacitors, inductors and sources
+also have **Change at time / Change to** fields. The **Std values** button snaps the selection (or
+the whole circuit) to the chosen E-series.
+
+<p align="center"><img src="docs/editor_tuner.png" width="80%" alt="Quick tuner in the schematic editor, with a value change marked on the waveform"></p>
+
 ## Drag-and-drop schematic editor
 
 ```bash
@@ -219,7 +283,7 @@ local server, which binds to `127.0.0.1` and only parses netlists.
 
 ```bash
 pip install -e ".[dev]"     # numpy + matplotlib + pytest
-pytest -q                   # 81 tests, ~20 s (the browser test runs when Node.js + Playwright are installed)
+pytest -q                   # 130 tests, ~35 s (the GUI and browser tests need Tkinter / Node.js + Playwright, otherwise they are skipped)
 ```
 
 ## Examples
@@ -242,6 +306,7 @@ Every script in `examples/` is self-contained and writes plots to
 | `11_semiconductor_curves.py` | Curve tracer: diode/Zener I-V, BJT and NMOS output characteristics, CMOS inverter VTC | Inverter threshold 2.496 V (ideal 2.5 V) |
 | `12_monte_carlo_tolerance.py` | Monte Carlo of filter cut-off with 1 %/5 % parts, yield against a ±3 % spec | Yield 91.7 % (5 % caps) vs 100 % (1 % caps) |
 | `13_linear_power_supply.py` | Transformer + bridge of real diodes + reservoir capacitor + Zener/BJT series regulator | 9.08 V at 0.5 A, 34 dB ripple rejection, 21 mV/V line regulation |
+| `14_value_changes.py` | Standard-value design (ideal vs E12/E24/E96 resistor), a buck converter with load and reference changes during the run, and value overrides from code | E24 puts the 1 kHz cut-off at 995 Hz (−0.5 %), E12 at 1061 Hz (+6 %) |
 
 Netlist examples are in `circuits/`:
 
@@ -299,6 +364,8 @@ B6 TF       y u num=1 den=1e-3,1
 .dc V1 0 5 0.01                    ; DC sweep: source start stop step
 .ac dec 20 10 1meg                 ; AC analysis: dec|oct|lin points fstart fstop
 .window 1m                         ; measurements over the last 1 ms
+.change 4m Rload 3                 ; change a value at a time: .change time target value
+.change 0.3 M1 tload=4             ;   or  key=value
 .plot V(out),vref I(L1)            ; comma = overlay in one panel
 .measure mean V(out)               ; mean | rms | max | min | pp | thd sig f0 [cycles]
 .end
@@ -376,7 +443,9 @@ openpe/
   simulator.py   MNA solver: transient (matrix caching, switch iteration, Newton), .op, .dc, .ac
   results.py     waveform analysis, plots, CSV
   analysis.py    parameter sweep, injection AC sweep, Monte Carlo, Bode helpers
-  designparams.py  find / change / sweep the numeric values of a netlist (design-time parameters)
+  designparams.py  find / change / sweep the numeric values of a netlist (design-time parameters), overrides, E-series snapping
+  changes.py     value changes: Circuit.at / set_value and the .change directive
+  eseries.py     standard component values (E6 ... E96): nearest / step
   netlist.py     text netlist parser
   gui.py         OpenPE Studio desktop GUI (Tkinter + matplotlib)
   server.py      local web server for the schematic editor (/api/simulate)

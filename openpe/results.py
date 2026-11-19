@@ -193,6 +193,15 @@ class Results:
             ax.grid(True, alpha=0.3)
             ax.legend(loc="upper right", fontsize=8)
         axes[-1, 0].set_xlabel(xlabel or f"time ({unit})")
+        if not xlabel:
+            scale = {"s": 1, "ms": 1e3, "µs": 1e6}[unit]
+            for chg in self.meta.get("changes") or []:        # mark scheduled value changes (.change / at())
+                tc = chg["t"] * scale
+                if t[0] <= tc <= t[-1]:
+                    for ax in axes[:, 0]:
+                        ax.axvline(tc, color="gray", linestyle="--", linewidth=0.9)
+                    axes[0, 0].annotate(f"{chg['target']} \u2192 {chg['value']:g}", (tc, 1.0), xycoords=("data", "axes fraction"),
+                                        fontsize=7, color="gray", rotation=90, va="top", ha="right")
         if xlim and not xlabel:
             s = {"s": 1, "ms": 1e3, "µs": 1e6}[unit]
             axes[-1, 0].set_xlim(xlim[0] * s, xlim[1] * s)

@@ -105,7 +105,7 @@ const near = (a, b, tol) => Math.abs(a - b) <= tol;
   await dcField.fill("10"); await dcField.press("Enter");
   // switch analyses: only .op
   await page.keyboard.press("Escape");
-  await page.mouse.click(...at(700, 600));
+  await page.mouse.click(...at(800, 130));        // empty canvas: deselect, show the analyses panel
   await page.locator('#props input[data-s="tran"]').uncheck();
   await page.locator('#props input[data-s="op"]').check();
   let net = await page.evaluate(() => OpenPE.buildNetlist());
@@ -134,6 +134,75 @@ const near = (a, b, tol) => Math.abs(a - b) <= tol;
   await page.waitForFunction((m) => OpenPE.results && Math.abs(OpenPE.results.op.voltages[m] - 5) < 1e-6, mid, { timeout: 15000 });
   await page.locator("#bAuto").click();                               // back off for the rest of the test
   console.log("design-time tuning with arrow keys + auto-run ok");
+
+  // ---- 2c. standard values (E-series) match the published tables
+  const e = await page.evaluate(() => [OpenPE.eNearest(4600, "E24"), OpenPE.eStep(4700, 1, "E24"), OpenPE.eStep(4700, -1, "E24"),
+    OpenPE.eStep(9100, 1, "E24"), OpenPE.eNearest(95000, "E96"), OpenPE.eStep(4300, 1, "E96"), OpenPE.eNearest(9.8e3, "E12"),
+    OpenPE.E_TABLES.E96.slice(0, 8), OpenPE.E_TABLES.E96[95], OpenPE.E_TABLES.E48.length]);
+  assert(e[0] === 4700 && e[1] === 5100 && e[2] === 4300 && e[3] === 10000, "E24 " + e.slice(0, 4));
+  assert(e[4] === 95300 && e[5] === 4320 && e[6] === 10000, "E96/E12 " + e.slice(4, 7));
+  assert(JSON.stringify(e[7]) === JSON.stringify([1, 1.02, 1.05, 1.07, 1.1, 1.13, 1.15, 1.18]) && e[8] === 9.76 && e[9] === 48, "tables");
+
+  // ---- 2d. quick tuner: double-click a part, step through standard values, slide, reset, undo
+  const R1b = (await page.evaluate(() => OpenPE.doc)).comps.find((c) => c.props.name === "R1");
+  await page.mouse.dblclick(...at(R1b.x, R1b.y));
+  await page.waitForFunction(() => OpenPE.tunerOpen);
+  assert((await page.locator("#tuVal").inputValue()) === "1k", "tuner shows the value");
+  await page.locator("#tuVal").press("PageUp");                                // E24: 1k -> 1.1k
+  assert((await page.locator("#tuVal").inputValue()) === "1.1k", "PageUp -> next standard value");
+  assert((await page.evaluate(() => OpenPE.doc.comps.find((c) => c.props.name === "R1").props.value)) === "1.1k", "applied to the part");
+  await page.locator("#tuUp").click();                                         // 1.2k
+  await page.locator("#tuSeries").selectOption("E96");
+  await page.locator("#tuDn").click();                                         // E96 below 1.2k -> 1.18k
+  assert((await page.locator("#tuVal").inputValue()) === "1.18k", "E96 step down: " + (await page.locator("#tuVal").inputValue()));
+  await page.locator("#tuSlider").fill("100");                                 // x10 of the value when opened (1k)
+  assert((await page.locator("#tuVal").inputValue()) === "10k", "slider x10: " + (await page.locator("#tuVal").inputValue()));
+  await page.locator("#tuVal").fill("4.6k"); await page.locator("#tuSeries").selectOption("E24");
+  await page.locator("#tuSnap").click();
+  assert((await page.locator("#tuVal").inputValue()) === "4.7k", "snap to nearest E24");
+  await page.locator("#tuVal").fill("bogus");
+  assert(await page.locator("#tuVal").evaluate((i) => i.classList.contains("bad")), "invalid value flagged");
+  assert((await page.evaluate(() => OpenPE.doc.comps.find((c) => c.props.name === "R1").props.value)) === "4.7k", "invalid text not applied");
+  await page.locator("#tuReset").click();
+  assert((await page.evaluate(() => OpenPE.doc.comps.find((c) => c.props.name === "R1").props.value)) === "1k", "reset to the opening value");
+  await page.keyboard.press("Escape");
+  assert(!(await page.evaluate(() => OpenPE.tunerOpen)), "Escape closes the tuner");
+  await page.mouse.dblclick(...at(R1b.x, R1b.y));
+  await page.locator("#tuVal").press("PageDown");                              // 1k -> 910
+  assert((await page.evaluate(() => OpenPE.doc.comps.find((c) => c.props.name === "R1").props.value)) === "910", "PageDown");
+  await page.locator("#tuClose").click();
+  await page.keyboard.press("Control+z");                                      // one undo step restores 1k
+  assert((await page.evaluate(() => OpenPE.doc.comps.find((c) => c.props.name === "R1").props.value)) === "1k", "undo after tuning");
+  console.log("quick tuner + standard values ok");
+
+  // ---- 2e. snap with the toolbar, and schedule a value change at a time
+  await page.mouse.click(...at(R1b.x, R1b.y));
+  const rVal = page.locator('#props input[data-k="value"]');
+  await rVal.fill("4.6k"); await rVal.press("Enter");
+  await page.locator("#bStd").click();                                         // default series E24, selection = R1
+  assert((await page.evaluate(() => OpenPE.doc.comps.find((c) => c.props.name === "R1").props.value)) === "4.7k", "toolbar snap");
+  await rVal.fill("1k"); await rVal.press("Enter");
+  const R2c = (await page.evaluate(() => OpenPE.doc)).comps.find((c) => c.props.name === "R2");
+  await page.mouse.click(...at(R2c.x, R2c.y));
+  await page.locator('#props input[data-k="chgT"]').fill("2m"); await page.locator('#props input[data-k="chgT"]').press("Enter");
+  let bad = await page.evaluate(() => OpenPE.buildNetlist());
+  assert(bad.errors.some((m) => m.includes("both")), "half-filled change is reported: " + bad.errors.join("; "));
+  await page.locator('#props input[data-k="chgV"]').fill("3k"); await page.locator('#props input[data-k="chgV"]').press("Enter");
+  net = await page.evaluate(() => OpenPE.buildNetlist());
+  assert(!net.errors.length && net.text.includes(".change 2m R2 3k"), "change directive emitted\n" + net.text);
+  await page.evaluate(() => { OpenPE.doc.sim.tran = true; OpenPE.doc.sim.dt = "20u"; OpenPE.doc.sim.tend = "4m"; });
+  await page.evaluate(() => OpenPE.runSim());
+  await page.waitForFunction(() => OpenPE.results && OpenPE.results.tran && OpenPE.results.changes && OpenPE.results.changes.length === 1);
+  res = await page.evaluate(() => OpenPE.results);
+  const vm = res.tran.signals[`V(${mid})`];
+  assert(near(vm[10], 5, 1e-6) && near(vm[vm.length - 1], 7.5, 1e-6), `value change in the transient: ${vm[10]} -> ${vm[vm.length - 1]}`);
+  assert(res.changes[0].target === "R2" && res.changes[0].value === 3000, "change reported to the page");
+  await page.locator('#props input[data-k="chgT"]').fill(""); await page.locator('#props input[data-k="chgT"]').press("Enter");
+  await page.locator('#props input[data-k="chgV"]').fill(""); await page.locator('#props input[data-k="chgV"]').press("Enter");
+  await page.evaluate(() => { OpenPE.doc.sim.tran = false; });
+  net = await page.evaluate(() => OpenPE.buildNetlist());
+  assert(!net.text.includes(".change"), "cleared change fields leave no directive");
+  console.log("snap + scheduled value change ok");
 
   // ---- 3. move R2 by dragging its body: attached wires must follow
   const before = await pin("R2", 0);

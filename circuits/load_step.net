@@ -1,0 +1,28 @@
+* Buck converter with a load step: the load resistor changes from 6 ohm to 3 ohm at 4 ms
+* and the voltage reference changes from 12 V to 9 V at 7 ms - no extra switches or sources needed.
+.title Buck converter with value changes
+.param vin=48 fsw=50k
+Vin   in  0   DC {vin}
+S1    in  sw  gate
+D1    0   sw
+L1    sw  out 100u
+C1    out 0   220u
+Rload out 0   6
+* ---- control circuit
+B1 VSENSOR  vo out 0
+B2 ISENSOR  il_raw L1
+B3 ZOH      il il_raw fs={fsw}
+B4 CONST    vref value=12
+B5 SUM      verr vref vo signs=+-
+B6 PI       iref verr kp=0.7 ki=700 lo=0 hi=10
+B7 SUM      ierr iref il signs=+-
+B8 PI       duty ierr kp=0.065 ki=200 lo=0 hi=0.9
+B9 PWM      gate duty freq={fsw}
+* ---- run-time value changes
+.change 4m Rload 3
+.change 7m vref 9
+.tran 0.2u 10m
+.plot V(out),vref I(L1)
+.measure mean V(out)
+.window 0.5m
+.end

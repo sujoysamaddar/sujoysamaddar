@@ -1,4 +1,5 @@
 """Circuit container: a power circuit (elements) plus a control circuit (blocks)."""
+from . import changes as chg
 from . import control as ctl
 from . import devices as dv
 from . import elements as el
@@ -16,6 +17,7 @@ class Circuit:
         self.title = title
         self.elements = []
         self.blocks = []
+        self.changes = []          # scheduled run-time value changes (see openpe.changes)
 
     # ------------------------------------------------------------------
     def add(self, *items):
@@ -49,6 +51,46 @@ class Circuit:
     def copy(self):
         import copy
         return copy.deepcopy(self)
+
+    # ------------------------------------------------------------------
+    # value changes
+    def _target(self, name):
+        return chg.find_target(self.elements, self.blocks, name)
+
+    def set_value(self, target, value=None, **attrs):
+        """Change a component / control-block value now (before simulating).
+
+            c.set_value("R1", 4.7e3)              # the target's main value
+            c.set_value("B1", kp=0.2, ki=150)     # named parameters
+        """
+        obj = self._target(target)
+        if value is None and not attrs:
+            raise ValueError("give a value or keyword parameters")
+        if value is not None:
+            chg.set_attr(obj, None, value)
+        for k, v in attrs.items():
+            chg.set_attr(obj, k, v)
+        return self
+
+    def get_value(self, target, attr=None):
+        """Current value of a component / block parameter."""
+        return chg.get_attr(self._target(target), attr)
+
+    def at(self, t, target, value=None, **attrs):
+        """Schedule a value change at simulation time ``t`` (seconds).
+
+            c.at(5e-3, "RL", 2.0)           # load resistor becomes 2 ohm at 5 ms
+            c.at(8e-3, "d", 0.5)            # control signal 'd' (a Constant) steps to 0.5
+            c.at(0.3, "M1", t_load=4.0)     # motor load torque
+        """
+        if value is None and not attrs:
+            raise ValueError("give a value or keyword parameters")
+        self._target(target)               # fail early on a wrong name
+        if value is not None:
+            self.changes.append(chg.ValueChange(float(t), target, None, float(value)))
+        for k, v in attrs.items():
+            self.changes.append(chg.ValueChange(float(t), target, k, float(v)))
+        return self
 
     def subcircuit(self, prefix, other, port_map):
         """Insert a copy of circuit ``other`` with its node/signal names

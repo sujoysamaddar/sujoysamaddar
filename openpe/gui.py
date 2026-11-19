@@ -9,6 +9,7 @@ plots with zoom and pan, an operating-point table, a runner for the
 example scripts that shows the plots they produce, and a button that opens
 the drag-and-drop schematic editor.
 """
+import contextlib
 import glob
 import os
 import queue
@@ -21,7 +22,7 @@ import webbrowser
 
 try:
     import tkinter as tk
-    from tkinter import filedialog, messagebox, ttk
+    from tkinter import filedialog, messagebox, simpledialog, ttk
 except ImportError as exc:  # pragma: no cover - depends on the Python build
     raise ImportError(
         "The desktop GUI needs Tkinter, which is missing from this Python installation. "
@@ -105,6 +106,19 @@ class Studio:
         self._poll_job = self._after(100, self._poll)
 
 
+    @contextlib.contextmanager
+    def _undo_group(self):
+        """Make everything done inside the block a single Ctrl+Z step in the
+        netlist editor (a replacement is a delete plus an insert, which Tk
+        would otherwise undo one half at a time)."""
+        self.text.edit_separator()
+        self.text.configure(autoseparators=False)
+        try:
+            yield
+        finally:
+            self.text.edit_separator()
+            self.text.configure(autoseparators=True)
+
     # ------------------------------------------------------------------ timers
     def _after(self, ms, fn):
         """root.after() that is tracked, so closing the window cancels it."""
@@ -156,6 +170,9 @@ class Studio:
         m.add_cascade(label="Run", menu=r)
         t = tk.Menu(m, tearoff=False)
         t.add_command(label="Open drag-and-drop schematic editor", command=self.open_schematic_editor)
+        t.add_separator()
+        t.add_command(label="Snap R / C / L values to a standard series...", command=self.snap_dialog)
+        t.add_command(label="Schedule a value change during the simulation...", command=self.schedule_change)
         m.add_cascade(label="Tools", menu=t)
         h = tk.Menu(m, tearoff=False)
         h.add_command(label="Netlist syntax", command=self.show_syntax)
@@ -552,6 +569,13 @@ class Studio:
             ax.grid(True, alpha=0.3)
         axes[-1].xaxis.set_major_formatter(EngFormatter(unit="s"))
         axes[-1].set_xlabel("time")
+        for chg in res.get("changes") or []:                     # mark scheduled value changes
+            if t and t[0] <= chg["t"] <= t[-1]:
+                for ax in axes:
+                    ax.axvline(chg["t"], color="#6b7280", ls="--", lw=0.9)
+                axes[0].annotate(f"{chg['target']}\u2192{chg['value']:g}", (chg["t"], 1.0),
+                                 xycoords=("data", "axes fraction"), fontsize=7, color="#6b7280",
+                                 rotation=90, va="top", ha="right")
         self.canvas_w.draw_idle()
 
     def _plot_ac(self, ac):
@@ -653,6 +677,15 @@ class Studio:
         self.p_range = tk.StringVar(value="slider: nominal ÷10 … ×10")
         ttk.Label(tune, textvariable=self.p_range, foreground="gray").grid(row=3, column=0, columnspan=3, sticky="w")
         ttk.Label(tune, text="↑/↓ in the box: ±10 %", foreground="gray").grid(row=4, column=0, columnspan=3, sticky="w")
+        ttk.Label(tune, text="Standard values (E-series)", foreground="gray").grid(row=5, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        std = ttk.Frame(tune)
+        std.grid(row=6, column=0, columnspan=3, sticky="ew")
+        self.series_var = tk.StringVar(value="E24")
+        ttk.Combobox(std, textvariable=self.series_var, values=["E6", "E12", "E24", "E48", "E96"],
+                     width=5, state="readonly").pack(side="left")
+        ttk.Button(std, text="\u25c0", width=3, command=lambda: self.std_step(-1)).pack(side="left", padx=(4, 1))
+        ttk.Button(std, text="\u25b6", width=3, command=lambda: self.std_step(+1)).pack(side="left", padx=1)
+        ttk.Button(std, text="Snap", width=5, command=self.std_snap).pack(side="left", padx=(4, 0))
         tune.columnconfigure(0, weight=1)
         # sweep box
         sw = ttk.LabelFrame(pane, text="Parameter sweep", padding=6)
@@ -745,6 +778,94 @@ class Studio:
             from .designparams import format_value
             self.p_value.set(format_value(nom * 10 ** float(x), 3))
 
+    def std_step(self, direction):
+        """Move the value to the next / previous standard (E-series) value."""
+        from . import eseries
+        from .designparams import format_value
+        from .units import parse_value
+        try:
+            v = parse_value(self.p_value.get())
+            self.p_value.set(format_value(eseries.step(v, direction, self.series_var.get()), 4))
+        except ValueError:
+            self.status.set("Standard values need a positive number")
+            return
+        self.apply_param()
+
+    def std_snap(self):
+        """Replace the value with the nearest standard (E-series) value."""
+        from . import eseries
+        from .designparams import format_value
+        from .units import parse_value
+        try:
+            v = parse_value(self.p_value.get())
+            n = eseries.nearest(v, self.series_var.get())
+            self.p_value.set(format_value(n, 4))
+            self.status.set(f"nearest {self.series_var.get()} value: {format_value(n, 4)} "
+                            f"({eseries.error_percent(v, self.series_var.get()):+.2f} %)")
+        except ValueError:
+            self.status.set("Standard values need a positive number")
+            return
+        self.apply_param()
+
+    def snap_dialog(self, series=None, kinds=None):
+        """Snap every R / C / L value of the netlist to a standard series."""
+        from .designparams import snap_to_series
+        if series is None:
+            ans = simpledialog.askstring(
+                "Standard values", "Series (E6, E12, E24, E48, E96) and parts to snap (R, C, L), e.g.  E24 RC",
+                initialvalue="E24 RC", parent=self.root)
+            if not ans:
+                return
+            parts = ans.split()
+            series = parts[0].upper()
+            kinds = parts[1].upper() if len(parts) > 1 else "RC"
+        try:
+            new, changed = snap_to_series(self.text.get("1.0", "end-1c"), series, kinds or "RC")
+        except ValueError as exc:
+            messagebox.showerror("Standard values", str(exc))
+            return
+        if not changed:
+            self.status.set(f"All {kinds or 'RC'} values are already {series} values")
+            return
+        with self._undo_group():                               # one Ctrl+Z restores every snapped value
+            self.text.delete("1.0", "end")
+            self.text.insert("1.0", new)
+        self._highlight()
+        self.refresh_params()
+        self.log_write(f"=== snapped to {series} ===\n", "ok")
+        for name, old, nv, err in changed:
+            self.log_write(f"  {name}: {old} -> {nv}  ({err:+.2f} %)\n")
+        self.status.set(f"{len(changed)} value(s) snapped to {series} (Ctrl+Z in the editor undoes it)")
+        if self.autorun.get():
+            self.run_netlist()
+
+    def schedule_change(self, spec=None):
+        """Insert a '.change' line: a value that changes at a time during the simulation."""
+        from .netlist import parse
+        if spec is None:
+            spec = simpledialog.askstring(
+                "Value change during the simulation",
+                "time target value   (examples:  5m Rload 3     0.3 M1 tload=4     7m vref 9)",
+                parent=self.root)
+        if not spec or not spec.strip():
+            return
+        line = ".change " + spec.strip()
+        lines = self.text.get("1.0", "end-1c").split("\n")
+        at = next((i for i, ln in enumerate(lines) if ln.strip().lower().startswith((".tran", ".end"))), len(lines))
+        trial = "\n".join(lines[:at] + [line] + lines[at:])
+        try:
+            from .simulator import Simulator
+            Simulator(parse(trial).circuit, 1e-6, 1e-6)    # parses, then resolves targets and attributes
+        except Exception as exc:
+            messagebox.showerror("Value change", str(exc))
+            return
+        self.text.insert(f"{at + 1}.0", line + "\n")
+        self._highlight()
+        self.refresh_params()
+        self.status.set(f"added: {line}")
+        if self.autorun.get():
+            self.run_netlist()
+
     def step_param(self, direction):
         from .designparams import format_value
         from .units import parse_value
@@ -777,8 +898,9 @@ class Studio:
         if new == p.value:
             return True
         line = p.line + 1
-        self.text.delete(f"{line}.{p.start}", f"{line}.{p.end}")
-        self.text.insert(f"{line}.{p.start}", new)
+        with self._undo_group():
+            self.text.delete(f"{line}.{p.start}", f"{line}.{p.end}")
+            self.text.insert(f"{line}.{p.start}", new)
         self._highlight()
         self.refresh_params()
         self.status.set(f"{p.label} = {new}")

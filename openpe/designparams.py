@@ -12,6 +12,7 @@ Recognised values:
   * every ``key=value`` option of an element or control block (kp, ki, freq, ...)
   * E/G/F/H gains, 3-phase source voltage and frequency
   * ``.tran`` time step and stop time, ``.ac`` and ``.dc`` limits
+  * ``.change`` events: the time and the new value of each scheduled change
 Values written as ``{name}`` refer to a ``.param`` and are not listed
 separately: change the ``.param`` instead.
 """
@@ -63,6 +64,7 @@ def extract_params(text):
     """Return the adjustable numeric values of a netlist, in file order."""
     out = []
     owner = None                                  # element a '+' continuation belongs to
+    n_change = 0
     for i, raw in enumerate(text.splitlines()):
         s = raw.strip()
         if not s or s[0] in "*#":
@@ -94,6 +96,13 @@ def extract_params(text):
                 add(".tran", "time step", toks[1])
                 add(".tran", "stop time", toks[2])
                 out += _kv(".tran", toks, i, skip_first=True, keys={"start"})
+            elif d == ".change" and len(toks) >= 3:
+                n_change += 1
+                g = f".change{n_change} {toks[2][0]}"
+                add(g, "time", toks[1])
+                if len(toks) >= 4 and "=" not in toks[3][0]:
+                    add(g, "value", toks[3])
+                out += _kv(g, toks, i, skip_first=True)
             elif d == ".ac" and len(toks) >= 5:
                 add(".ac", "points", toks[2])
                 add(".ac", "start freq", toks[3])
@@ -217,3 +226,66 @@ def sweep_values(start, stop, n, log=False):
             raise ValueError("a logarithmic sweep needs positive limits")
         return [a * (b / a) ** (k / (n - 1)) for k in range(n)]
     return [a + (b - a) * k / (n - 1) for k in range(n)]
+
+
+# ---------------------------------------------------------------------------
+# command-line style overrides and standard-value snapping
+# ---------------------------------------------------------------------------
+def apply_overrides(text, assignments):
+    """Apply ``["R1.value=4.7k", "vin=24", ...]`` to a netlist.  A label is
+    the one shown by :func:`extract_params` (``R1.value``, ``B4.kp``,
+    ``.tran.stop time``, or just ``vin`` for a ``.param``).  Matching is
+    case-insensitive; an unknown label lists close matches."""
+    import difflib
+    for a in assignments:
+        if "=" not in a:
+            raise ValueError(f"override {a!r} must look like LABEL=VALUE, e.g. R1.value=4.7k")
+        label, value = a.split("=", 1)
+        label = label.strip()
+        params = extract_params(text)          # re-extract: earlier edits may move offsets
+        by_label = {p.label: p for p in params}
+        match = by_label.get(label) or next((p for k, p in by_label.items() if k.lower() == label.lower()), None)
+        if match is None and "." not in label:     # 'R1' alone: use its main value if unambiguous
+            cand = [p for p in params if p.group.lower() == label.lower() and p.name in ("value", "dc")]
+            if len(cand) == 1:
+                match = cand[0]
+        if match is None:
+            close = difflib.get_close_matches(label, list(by_label), n=4, cutoff=0.5)
+            raise ValueError(f"unknown parameter {label!r}" + (f"; did you mean: {', '.join(close)}?" if close
+                                                                else " (use --list-params to see them)"))
+        text = set_param(text, match, value.strip())
+    return text
+
+
+def params_table(params):
+    """Human-readable table of parameters (label, value)."""
+    if not params:
+        return "(no adjustable values found)"
+    w = max(len(p.label) for p in params)
+    return "\n".join(f"{p.label:<{w}}  {p.value}" for p in params)
+
+
+_KIND_GROUP = {"R": "R", "C": "C", "L": "L"}
+
+
+def snap_to_series(text, series="E24", kinds="RC"):
+    """Replace the values of R / C / L elements (the letters in ``kinds``) with
+    the nearest standard value of an E-series.  Returns ``(new_text, changes)``
+    where ``changes`` is a list of ``(element, old, new, error_percent)`` for
+    the values that actually changed.  Values given as ``{param}`` references
+    are left alone."""
+    from . import eseries
+    changed = []
+    for p in extract_params(text):
+        if p.name != "value" or p.group[:1].upper() not in kinds.upper() or p.group.startswith("."):
+            continue
+        v = p.number
+        if v is None or v <= 0:
+            continue
+        snapped = eseries.nearest(v, series)
+        if abs(snapped - v) <= 1e-9 * v:
+            continue
+        new = format_value(snapped)
+        text = set_param(text, find(extract_params(text), p.label), new)
+        changed.append((p.group, p.value, new, 100.0 * (snapped - v) / v))
+    return text, changed

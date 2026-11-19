@@ -27,3 +27,7 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: npm install --no-save playwright@1.63.0 && npx playwright install --with-deps chromium
       - run: pytest -q tests/test_editor.py
+      - name: Desktop GUI tests (Tkinter under a virtual display)
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q xvfb
+          xvfb-run -a pytest -q tests/test_gui.py

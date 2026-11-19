@@ -26,3 +26,4 @@ openpe = ["editor/*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]          # tests run from a fresh checkout without "pip install -e ."

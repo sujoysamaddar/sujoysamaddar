@@ -8,6 +8,7 @@ from concurrent.futures import ProcessPoolExecutor
 import numpy as np
 
 from .control import SineWave
+from .results import _finish, _subplots
 from .simulator import Simulator
 
 
@@ -90,11 +91,7 @@ def ac_sweep(build, freqs, measure, perturb="ac_pert", amplitude=0.01, dt=1e-6,
 def plot_bode(resp, title="Frequency response", save=None, show=False, analytic=None):
     """Bode plot of an ac_sweep() result. ``analytic`` may be a dict of the
     same form to overlay (e.g. from a transfer-function model)."""
-    import matplotlib
-    if not show:
-        matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    fig, (a1, a2) = plt.subplots(2, 1, sharex=True, figsize=(8, 5.5))
+    fig, (a1, a2) = _subplots(show, 2, 1, sharex=True, figsize=(8, 5.5))
     a1.semilogx(resp["freq"], resp["mag_db"], "o-", label="simulated (injection)")
     a2.semilogx(resp["freq"], resp["phase_deg"], "o-")
     if analytic is not None:
@@ -110,9 +107,7 @@ def plot_bode(resp, title="Frequency response", save=None, show=False, analytic=
     fig.tight_layout()
     if save:
         fig.savefig(save, dpi=120)
-    if show:
-        plt.show()
-    plt.close(fig)
+    _finish(fig, show)
     return fig
 
 
@@ -153,12 +148,8 @@ class MonteCarloResult:
         return "\n".join(lines)
 
     def histogram(self, metric, bins=20, save=None, show=False, limits=None, title=None):
-        import matplotlib
-        if not show:
-            matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
         v = self.values(metric)
-        fig, ax = plt.subplots(figsize=(7, 3.8))
+        fig, ax = _subplots(show, figsize=(7, 3.8))
         ax.hist(v, bins=bins, edgecolor="white")
         if limits:
             for x in limits:
@@ -171,9 +162,7 @@ class MonteCarloResult:
         fig.tight_layout()
         if save:
             fig.savefig(save, dpi=120)
-        if show:
-            plt.show()
-        plt.close(fig)
+        _finish(fig, show)
         return fig
 
 

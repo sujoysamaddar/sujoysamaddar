@@ -58,6 +58,62 @@ res = amp.simulate(2e-6, 5e-3, initial="op")      # .tran from the bias point
 print(res.thd("V(c)", 1e3, cycles=2))             # harmonic distortion
 ```
 
+## Desktop GUI: OpenPE Studio
+
+```bash
+python gui.py                    # or: python main.py, python -m openpe, python -m openpe gui file.net
+```
+
+<p align="center"><img src="docs/studio.png" width="90%" alt="OpenPE Studio desktop window"></p>
+
+OpenPE Studio is a native desktop window built on Tkinter and matplotlib.
+Both ship with the python.org installers, so there's nothing extra to
+install.
+
+* **Library:** all bundled netlists and example scripts. Double-click a
+  netlist to open it, or a script to run it.
+* **Netlist editor:** syntax colouring, plus New, Open, Save and Save as.
+* **Running:** ▶ Run (`F5`) simulates in the background, so the window
+  stays responsive.
+* **Result tabs:**
+  * **Waveforms:** pick signals, stacked or overlaid, with matplotlib's
+    zoom, pan and save toolbar, engineering-unit axes and `.measure`
+    results.
+  * **AC analysis:** Bode plots with the −3 dB corners marked.
+  * **DC sweep:** sweep curves.
+  * **Operating point:** a table of node voltages, currents and device
+    values.
+  * **Script plots:** the PNGs produced by the example script you just ran.
+  * **Log:** messages and errors.
+* **Other:** export waveforms to CSV, and open the drag-and-drop schematic
+  editor (below) from the Tools menu or toolbar.
+* **Design parameters panel:** lists every adjustable value in the open
+  netlist, grouped by element:
+  * `.param` values
+  * R/L/C values
+  * source DC, AC and SIN/SQUARE/STEP settings
+  * switch, diode, transistor and op-amp options
+  * every control-block setting (Kp, Ki, PWM frequency...)
+  * transformer and coupling values
+  * `.tran`, `.ac` and `.dc` limits
+
+  Select a value, then type a new one, drag the slider (÷10 to ×10 of the
+  original), or use `↑`/`↓` to step ±10 %. The change is written into the
+  netlist and, with **Auto-run**, re-simulated immediately. Changed values
+  are highlighted and **Reset** restores the original.
+* **Parameter sweep:** sweep the selected value over a linear or log range
+  and overlay the chosen signal for every value. The log gets a table of
+  mean, min, max and final value per run, or peak gain and bandwidth for AC
+  analyses. The design itself is not modified.
+
+Design-time parameters are also available in Python:
+
+```python
+from openpe.designparams import extract_params, find, set_param
+text = open("circuits/rlc_step.net").read()
+text = set_param(text, find(extract_params(text), "R1.value"), "22")
+```
+
 ## Drag-and-drop schematic editor
 
 ```bash
@@ -88,7 +144,10 @@ local server, which binds to `127.0.0.1` and only parses netlists.
   Unconnected pins are marked, and control-signal wires are drawn dashed
   in a different colour from power wires. Connecting a signal to a power
   node is reported as an error.
-* **Properties panel:** edit names and values with validation. With
+* **Properties panel:** edit names and values with validation. Tune any
+  value at design time with `↑`/`↓` (±10 %, `Shift` for ×10 / ÷10) or the
+  mouse wheel. Turn on **Auto-run** in the toolbar and the circuit
+  re-simulates after every change. With
   nothing selected it shows the analyses: transient (from initial
   conditions or the bias point), operating point, AC and DC sweep.
 * **Results:** stacked waveform plots with a cursor readout, Bode plots
@@ -139,6 +198,22 @@ local server, which binds to `127.0.0.1` and only parses netlists.
 | **Robust convergence** | Newton with junction limiting, FET step limiting, op-amp output limiting, round-off limit-cycle detection, automatic time-step subdivision when Newton fails, and source stepping for the operating point. |
 
 ---
+
+## Running in PyCharm
+
+1. **Open the project.** Clone it (File → New → Project from Version Control) and check out `main`.
+2. **Pick an interpreter.** Settings → Project → Python Interpreter → Add Interpreter → new Virtualenv, Python 3.10 or newer.
+3. **Install the requirements.** Open `requirements.txt` and click **Install requirements** in the banner, or run `pip install -r requirements.txt` in PyCharm's terminal. Installing the package itself isn't needed.
+4. **Run.** Three ready-made run configurations appear in the Run menu, or right-click the matching file → **Run**:
+
+   | Run configuration | File | What it does |
+   |---|---|---|
+   | **OpenPE Studio (GUI)** | `gui.py` | Opens the desktop application window |
+   | **Schematic editor (browser)** | `main.py editor` | Starts the drag-and-drop schematic editor in your browser |
+   | **Run all examples** | `run_examples.py` | Runs every script in `examples/` and saves plots to `examples/output/` |
+   | **Run tests** | `run_tests.py` | Runs the pytest suite |
+
+   You can also right-click any single file in `examples/`, or run `openpe/__main__.py` or `openpe/server.py` directly.
 
 ## Installation
 
@@ -301,14 +376,18 @@ openpe/
   simulator.py   MNA solver: transient (matrix caching, switch iteration, Newton), .op, .dc, .ac
   results.py     waveform analysis, plots, CSV
   analysis.py    parameter sweep, injection AC sweep, Monte Carlo, Bode helpers
+  designparams.py  find / change / sweep the numeric values of a netlist (design-time parameters)
   netlist.py     text netlist parser
+  gui.py         OpenPE Studio desktop GUI (Tkinter + matplotlib)
   server.py      local web server for the schematic editor (/api/simulate)
   editor/        the drag-and-drop schematic editor (single HTML file, no dependencies)
-  __main__.py    command-line interface (run, editor, blocks)
+  __main__.py    command-line interface (gui, editor, run, blocks); no arguments = desktop GUI
 examples/        runnable showcase scripts (+ output/ plots)
 circuits/        example netlists
 tests/           pytest suite (analytic checks of every feature, editor API, browser e2e)
 docs/            screenshots
+gui.py, main.py, run_examples.py, run_tests.py   one-click launchers (also as PyCharm run configs in .run/)
+requirements.txt                          numpy, matplotlib, pytest
 ```
 
 ## License

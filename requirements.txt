@@ -1,0 +1,4 @@
+# Runtime + test dependencies (PyCharm offers to install these automatically).
+numpy>=1.21
+matplotlib>=3.5
+pytest>=7

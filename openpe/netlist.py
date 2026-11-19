@@ -1,18 +1,27 @@
 """Text netlist format.
 
-Power elements (SPICE-like, first letter = type):
+Circuit elements (SPICE-like, first letter = type):
 
     R<name> n1 n2 value
     L<name> n1 n2 value [ic=..]
     C<name> n1 n2 value [ic=..]
-    V<name> n+ n- DC v | SIN amp freq [phase offset] | SQUARE v1 v2 freq [duty] | SIGNAL sig [gain]
+    V<name> n+ n- [DC v] [AC mag [phase]] [SIN(offset amp freq [phase]) | SQUARE v1 v2 freq [duty]
+                  | STEP t v0 v1 | SIGNAL sig [gain]]
     I<name> n1 n2 (same forms as V)
-    D<name> anode cathode [vf=.. ron=.. roff=..]
+    D<name> anode cathode [vf=.. ron=.. roff=..]            (ideal switching diode)
+    D<name> anode cathode is=.. [n=.. rs=.. bv=.. cj=..]    (Shockley / Zener diode)
     S<name> n1 n2 gate_signal [ron=.. body_diode=1]
-    Q<name> anode cathode gate_signal          (thyristor)
+    Q<name> c b e NPN|PNP [is=.. bf=.. br=.. vaf=..]       (BJT)
+    Q<name> anode cathode gate_signal                       (thyristor)
+    M<name> d g s NMOS|PMOS [vto=.. kp=.. w=.. l=.. lambda=..]   (MOSFET)
+    M<name> a b ra=.. la=.. ke=.. j=.. [bf=.. tload=..]     (DC motor)
+    E<name> o+ o- i+ i- gain                                (VCVS)
+    G<name> o+ o- i+ i- gm                                  (VCCS)
+    F<name> o+ o- Vctrl gain                                (CCCS)
+    H<name> o+ o- Vctrl r                                   (CCVS)
+    X<name> OPAMP in+ in- out [gain=.. gbw=.. vmax=.. vmin=.. rout=..]
     T<name> p1 p2 s1 s2 n [lm=.. llk=..]       (transformer, n = Np/Ns)
     K<name> a b c d L1 L2 k                     (coupled inductors)
-    M<name> a b ra=.. la=.. ke=.. j=.. [bf=.. tload=..]   (DC motor)
     G<name> a b c n VLL freq                    (3-phase source, VLL rms)
 
 Control blocks:
@@ -29,7 +38,10 @@ Control blocks:
 
 Directives:
 
-    .tran dt t_end [method=trap|be] [start=t]
+    .tran dt t_end [method=trap|be] [start=t] [every=n] [init=ic|op]
+    .op                            (DC operating point)
+    .dc Vsrc start stop step       (DC sweep of an independent source)
+    .ac dec|oct|lin n fstart fstop (AC small-signal analysis)
     .plot sig1 sig2,sig3 ...       (comma = overlay in the same subplot)
     .measure mean|rms|max|min|pp|thd signal [f0]
     .window duration               (measure over the last `duration` seconds)
@@ -40,7 +52,10 @@ Lines starting with '*' or '#' are comments; '+' continues the previous line.
 """
 import re
 
+import numpy as np
+
 from . import control as ctl
+from . import devices as dv
 from . import elements as el
 from . import waveforms as wf
 from .circuit import Circuit
@@ -85,11 +100,23 @@ BLOCK_TYPES = {
 
 
 class Netlist:
-    def __init__(self, circuit, tran=None, plots=None, measures=None):
+    def __init__(self, circuit, tran=None, plots=None, measures=None, analyses=None):
         self.circuit = circuit
         self.tran = tran or {}
         self.plots = plots or []
         self.measures = measures or []
+        self.analyses = analyses or []   # [("op",), ("dc", src, values), ("ac", freqs)]
+
+    def op(self):
+        return self.circuit.op()
+
+    def dc(self):
+        a = next(a for a in self.analyses if a[0] == "dc")
+        return self.circuit.dc(a[1], a[2])
+
+    def ac(self):
+        a = next(a for a in self.analyses if a[0] == "ac")
+        return self.circuit.ac(a[1])
 
     @property
     def window(self):
@@ -124,26 +151,65 @@ def _numlist(v):
     return [parse_value(x) for x in v.strip("[]()").replace(";", ",").split(",") if x]
 
 
+def _isnum(t):
+    try:
+        parse_value(t)
+        return True
+    except ValueError:
+        return False
+
+
 def _source_value(name, args):
-    """Parse a source specification -> (value, signal, gain)."""
+    """Parse a source specification -> dict(value, signal, gain, ac, ac_phase)."""
     if not args:
         raise ValueError(f"{name}: missing source value")
-    kind = args[0].upper()
-    if kind == "DC":
-        return parse_value(args[1]), None, 1.0
-    if kind == "SIN":
-        vals = [parse_value(a) for a in args[1:]]
-        return wf.Sine(*vals), None, 1.0
-    if kind == "SQUARE":
-        vals = [parse_value(a) for a in args[1:]]
-        return wf.Square(*vals), None, 1.0
-    if kind == "STEP":
-        vals = [parse_value(a) for a in args[1:]]
-        return wf.Step(*vals), None, 1.0
-    if kind == "SIGNAL":
-        gain = parse_value(args[2]) if len(args) > 2 else 1.0
-        return 0.0, args[1], gain
-    return parse_value(args[0]), None, 1.0
+    out = {"value": None, "signal": None, "gain": 1.0, "ac": 0.0, "ac_phase": 0.0, "dc": None}
+    # SIN follows SPICE argument order: offset amplitude freq [phase_deg]
+    waves = {"SIN": lambda off, amp, f, ph=0.0: wf.Sine(amp, f, ph, off),
+             "SQUARE": wf.Square, "STEP": wf.Step}
+    i = 0
+    while i < len(args):
+        k = args[i].upper()
+        if k == "DC":
+            out["dc"] = parse_value(args[i + 1])
+            i += 2
+        elif k == "AC":
+            out["ac"] = parse_value(args[i + 1])
+            i += 2
+            if i < len(args) and _isnum(args[i]):
+                out["ac_phase"] = parse_value(args[i])
+                i += 1
+        elif k in waves:
+            j = i + 1
+            while j < len(args) and _isnum(args[j]):
+                j += 1
+            out["value"] = waves[k](*(parse_value(a) for a in args[i + 1:j]))
+            i = j
+        elif k == "SIGNAL":
+            out["signal"] = args[i + 1]
+            i += 2
+            if i < len(args) and _isnum(args[i]):
+                out["gain"] = parse_value(args[i])
+                i += 1
+        elif _isnum(args[i]):
+            out["value"] = parse_value(args[i])
+            i += 1
+        else:
+            raise ValueError(f"{name}: unexpected source token {args[i]!r}")
+    if out["value"] is None:          # only DC given: it is the transient value too
+        out["value"] = out["dc"] if out["dc"] is not None else 0.0
+        out["dc"] = None
+    return out
+
+
+def _freqs(kind, n, f1, f2):
+    kind = kind.lower()
+    n, f1, f2 = int(parse_value(n)), parse_value(f1), parse_value(f2)
+    if kind == "lin":
+        return np.linspace(f1, f2, n)
+    per = {"dec": 10.0, "oct": 2.0}[kind]
+    count = int(round(n * np.log(f2 / f1) / np.log(per))) + 1
+    return np.logspace(np.log10(f1), np.log10(f2), count)
 
 
 def parse(text, title=None):
@@ -161,7 +227,7 @@ def parse(text, title=None):
 
     params = {}
     c = Circuit(title or "netlist")
-    tran, plots, measures = {}, [], []
+    tran, plots, measures, analyses = {}, [], [], []
 
     def subst(s):
         return re.sub(r"\{(\w+)\}", lambda m: params[m.group(1)], s)
@@ -187,6 +253,17 @@ def parse(text, title=None):
                         tran["t_record_start"] = parse_value(kw["start"])
                     if "every" in kw:
                         tran["record_every"] = int(parse_value(kw["every"]))
+                    if "init" in kw:
+                        tran["initial"] = kw["init"].lower()   # 'ic' (default) or 'op'
+
+                elif d == ".op":
+                    analyses.append(("op",))
+                elif d == ".dc":
+                    start, stop, step = (parse_value(v) for v in tok[2:5])
+                    nstep = int(round((stop - start) / step))
+                    analyses.append(("dc", tok[1], start + step * np.arange(nstep + 1)))
+                elif d == ".ac":
+                    analyses.append(("ac", _freqs(*tok[1:5])))
                 elif d == ".plot":
                     plots.extend([_split_overlay(g) for g in tok[1:]])
                 elif d == ".window":
@@ -210,11 +287,39 @@ def parse(text, title=None):
             elif kind == "C":
                 c.add(el.Capacitor(head, pos[0], pos[1], parse_value(pos[2]), _num(kw.get("ic", 0))))
             elif kind in "VI":
-                val, sig, gain = _source_value(head, pos[2:])
+                spec = _source_value(head, re.sub(r"[()]", " ", " ".join(pos[2:])).split())
                 cls = el.VoltageSource if kind == "V" else el.CurrentSource
-                c.add(cls(head, pos[0], pos[1], val, signal=sig, gain=gain))
+                c.add(cls(head, pos[0], pos[1], spec.pop("value"), **spec))
             elif kind == "D":
-                c.add(el.Diode(head, pos[0], pos[1], **{k: _num(v) for k, v in kw.items()}))
+                opts = {k: _num(v) for k, v in kw.items()}
+                if set(opts) & {"is", "n", "rs", "bv", "ibv", "cj"}:
+                    if "is" in opts:
+                        opts["is_"] = opts.pop("is")
+                    c.add(dv.PNDiode(head, pos[0], pos[1], **opts))
+                else:
+                    c.add(el.Diode(head, pos[0], pos[1], **opts))
+            elif kind == "E":
+                c.add(dv.VCVS(head, *pos[:4], parse_value(pos[4])))
+            elif kind == "G" and len(pos) == 5:
+                c.add(dv.VCCS(head, *pos[:4], parse_value(pos[4])))
+            elif kind == "F":
+                c.add(dv.CCCS(head, pos[0], pos[1], pos[2], parse_value(pos[3])))
+            elif kind == "H":
+                c.add(dv.CCVS(head, pos[0], pos[1], pos[2], parse_value(pos[3])))
+            elif kind == "X":
+                if pos[0].upper() != "OPAMP":
+                    raise ValueError("only 'X<name> OPAMP in+ in- out ...' is supported")
+                c.add(dv.OpAmp(head, pos[1], pos[2], pos[3], **{k: _num(v) for k, v in kw.items()}))
+            elif kind == "Q" and len(pos) >= 4 and pos[3].upper() in ("NPN", "PNP"):
+                opts = {k: _num(v) for k, v in kw.items()}
+                if "is" in opts:
+                    opts["is_"] = opts.pop("is")
+                c.add(dv.BJT(head, pos[0], pos[1], pos[2], pos[3], **opts))
+            elif kind == "M" and len(pos) >= 4 and pos[3].upper() in ("NMOS", "PMOS"):
+                opts = {k: _num(v) for k, v in kw.items()}
+                if "lambda" in opts:
+                    opts["lam"] = opts.pop("lambda")
+                c.add(dv.MOSFET(head, pos[0], pos[1], pos[2], pos[3], **opts))
             elif kind == "S":
                 opts = {k: _num(v) for k, v in kw.items()}
                 if "body_diode" in opts:
@@ -241,7 +346,7 @@ def parse(text, title=None):
                 raise ValueError(f"unknown element type {head!r}")
         except (IndexError, KeyError, ValueError, TypeError) as exc:
             raise ValueError(f"netlist line {lineno}: {ln!r}: {exc}") from exc
-    return Netlist(c, tran, plots, measures)
+    return Netlist(c, tran, plots, measures, analyses)
 
 
 def _split_overlay(group):

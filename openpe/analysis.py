@@ -122,3 +122,86 @@ def tf_response(num, den, freqs):
     h = np.polyval(num, s) / np.polyval(den, s)
     return {"freq": np.asarray(freqs), "gain": np.abs(h), "mag_db": 20 * np.log10(np.abs(h)),
             "phase_deg": np.degrees(np.angle(h))}
+
+
+# ---------------------------------------------------------------------------
+# Monte Carlo tolerance analysis
+# ---------------------------------------------------------------------------
+class MonteCarloResult:
+    def __init__(self, rows, params, metrics):
+        self.rows, self.params, self.metrics = rows, params, metrics
+
+    def values(self, name):
+        return np.array([r[name] for r in self.rows], float)
+
+    def stats(self, metric):
+        v = self.values(metric)
+        return {"mean": float(np.mean(v)), "std": float(np.std(v, ddof=1)) if len(v) > 1 else 0.0,
+                "min": float(np.min(v)), "max": float(np.max(v))}
+
+    def yield_(self, metric, lo=-math.inf, hi=math.inf):
+        """Fraction of runs with lo <= metric <= hi."""
+        v = self.values(metric)
+        return float(np.mean((v >= lo) & (v <= hi)))
+
+    def summary(self):
+        lines = [f"Monte Carlo: {len(self.rows)} runs",
+                 f"{'metric':<16}{'mean':>12}{'std':>12}{'min':>12}{'max':>12}"]
+        for m in self.metrics:
+            st = self.stats(m)
+            lines.append(f"{m:<16}{st['mean']:12.5g}{st['std']:12.5g}{st['min']:12.5g}{st['max']:12.5g}")
+        return "\n".join(lines)
+
+    def histogram(self, metric, bins=20, save=None, show=False, limits=None, title=None):
+        import matplotlib
+        if not show:
+            matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        v = self.values(metric)
+        fig, ax = plt.subplots(figsize=(7, 3.8))
+        ax.hist(v, bins=bins, edgecolor="white")
+        if limits:
+            for x in limits:
+                ax.axvline(x, color="C3", linestyle="--")
+        st = self.stats(metric)
+        ax.set_title(title or f"{metric}: mean {st['mean']:.4g}, sigma {st['std']:.3g} ({len(v)} runs)")
+        ax.set_xlabel(metric)
+        ax.set_ylabel("count")
+        ax.grid(alpha=0.3)
+        fig.tight_layout()
+        if save:
+            fig.savefig(save, dpi=120)
+        if show:
+            plt.show()
+        plt.close(fig)
+        return fig
+
+
+def monte_carlo(run, nominal, tolerances, n=100, seed=0, distribution="uniform"):
+    """Monte Carlo tolerance analysis.
+
+    run         : function(**params) -> {"metric": value, ...}; it builds the
+                  circuit from the parameters and runs any analysis
+                  (transient, .op, .ac ...)
+    nominal     : {"R1": 10e3, "C1": 1e-9, ...}
+    tolerances  : {"R1": 0.01, "C1": 0.05, ...} relative tolerance.  For
+                  'uniform' values are spread over +/-tol; for 'gauss' tol
+                  is the 3-sigma limit.
+    """
+    if distribution not in ("uniform", "gauss"):
+        raise ValueError("distribution must be 'uniform' or 'gauss'")
+    rng = np.random.default_rng(seed)
+    rows, metrics = [], None
+    for _ in range(n):
+        p = {}
+        for k, v in nominal.items():
+            tol = tolerances.get(k, 0.0)
+            f = rng.uniform(-tol, tol) if distribution == "uniform" else rng.normal(0.0, tol / 3.0)
+            p[k] = v * (1.0 + f)
+        res = run(**p)
+        if metrics is None:
+            metrics = list(res)
+        row = dict(p)
+        row.update(res)
+        rows.append(row)
+    return MonteCarloResult(rows, list(nominal), metrics or [])

@@ -186,14 +186,18 @@ class Results:
         groups = [[g] if isinstance(g, str) else list(g) for g in groups]
         fig, axes = plt.subplots(len(groups), 1, sharex=True,
                                  figsize=figsize or (9, 2.2 * len(groups) + 0.8), squeeze=False)
-        t, unit = _time_scale(self.t)
+        xlabel = self.meta.get("xlabel")
+        if xlabel:
+            t, unit = self.t, None
+        else:
+            t, unit = _time_scale(self.t)
         for ax, grp in zip(axes[:, 0], groups):
             for n in grp:
                 ax.plot(t, self[n], label=n, linewidth=1)
             ax.grid(True, alpha=0.3)
             ax.legend(loc="upper right", fontsize=8)
-        axes[-1, 0].set_xlabel(f"time ({unit})")
-        if xlim:
+        axes[-1, 0].set_xlabel(xlabel or f"time ({unit})")
+        if xlim and not xlabel:
             s = {"s": 1, "ms": 1e3, "µs": 1e6}[unit]
             axes[-1, 0].set_xlim(xlim[0] * s, xlim[1] * s)
         fig.suptitle(title or self.meta.get("title", ""))

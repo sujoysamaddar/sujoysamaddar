@@ -12,6 +12,8 @@ node to its second node *through the element* (passive sign convention), so
 v*i > 0 means power absorbed.  For sources this means delivered power is
 negative.
 """
+import numpy as np
+
 from .waveforms import as_waveform
 
 GROUND_NAMES = {"0", "gnd", "GND", "ground"}
@@ -46,6 +48,7 @@ class Element:
 
     n_branch = 0          # extra MNA unknowns (branch currents, speeds, ...)
     is_switching = False  # True for devices with on/off state
+    is_nonlinear = False  # True for devices linearised by Newton-Raphson
 
     def __init__(self, name, *nodes):
         self.name = name
@@ -69,6 +72,21 @@ class Element:
 
     def update(self, x, ctx):
         """Called once a time step has been accepted."""
+
+    def resolve(self, lookup):
+        """Called after MNA indices are assigned; ``lookup(name)`` returns
+        another primitive element (used by current-controlled sources)."""
+
+    def stamp_nl(self, A, rhs, x, ctx):
+        """Nonlinear devices: stamp the Newton-Raphson linearisation about x."""
+
+    def stamp_ac(self, Y, rhs, w, ctx):
+        """Small-signal AC stamp at angular frequency w about the operating
+        point ctx.x (ctx.method == 'dc').  Default: frequency-independent
+        stamp plus, for nonlinear devices, their small-signal conductances."""
+        self.stamp_A(Y, ctx)
+        if self.is_nonlinear:
+            self.stamp_nl(Y, np.zeros(Y.shape[0]), ctx.x, ctx)
 
     def current(self, x):
         return 0.0
@@ -109,11 +127,16 @@ class Capacitor(Element):
         self.v_prev, self.i_prev = self.ic, 0.0
 
     def _geq(self, ctx):
+        if ctx.method == "dc":
+            return 0.0  # open circuit
         return (2.0 if ctx.method == "trap" else 1.0) * self.c / ctx.dt
 
     def _ieq(self, ctx):
         g = self._geq(ctx)
         return g * self.v_prev + (self.i_prev if ctx.method == "trap" else 0.0)
+
+    def stamp_ac(self, Y, rhs, w, ctx):
+        stamp_g(Y, self.idx[0], self.idx[1], 1j * w * self.c)
 
     def stamp_A(self, A, ctx):
         stamp_g(A, self.idx[0], self.idx[1], self._geq(ctx))
@@ -131,6 +154,10 @@ class Capacitor(Element):
 
 
 class Inductor(Element):
+    """Inductor with its current as an MNA unknown (exact short circuit in
+    DC analysis; usable as the controlling branch of F/H sources)."""
+    n_branch = 1
+
     def __init__(self, name, a, b, l, ic=0.0):
         super().__init__(name, a, b)
         self.l, self.ic = float(l), float(ic)
@@ -138,24 +165,35 @@ class Inductor(Element):
     def init(self, ctx):
         self.v_prev, self.i_prev = 0.0, self.ic
 
-    def _geq(self, ctx):
-        return ctx.dt / ((2.0 if ctx.method == "trap" else 1.0) * self.l)
-
-    def _ihist(self, ctx):
-        if ctx.method == "trap":
-            return self.i_prev + self._geq(ctx) * self.v_prev
-        return self.i_prev
+    def _req(self, ctx):
+        if ctx.method == "dc":
+            return 0.0
+        return (2.0 if ctx.method == "trap" else 1.0) * self.l / ctx.dt
 
     def stamp_A(self, A, ctx):
-        stamp_g(A, self.idx[0], self.idx[1], self._geq(ctx))
+        a, b = self.idx
+        k = self.br[0]
+        if a >= 0:
+            A[a, k] += 1
+            A[k, a] += 1
+        if b >= 0:
+            A[b, k] -= 1
+            A[k, b] -= 1
+        A[k, k] -= self._req(ctx)
 
     def stamp_b(self, rhs, ctx):
-        stamp_i(rhs, self.idx[0], self.idx[1], self._ihist(ctx))
+        # trap: v_n - (2L/dt) i_n = -v_{n-1} - (2L/dt) i_{n-1}
+        # be:   v_n - (L/dt)  i_n = -(L/dt) i_{n-1}
+        r = self._req(ctx)
+        rhs[self.br[0]] += -r * self.i_prev - (self.v_prev if ctx.method == "trap" else 0.0)
+
+    def stamp_ac(self, Y, rhs, w, ctx):
+        self.stamp_A(Y, ctx)
+        Y[self.br[0], self.br[0]] -= 1j * w * self.l
 
     def update(self, x, ctx):
-        v = self.voltage(x)
-        self.i_prev = self._geq(ctx) * v + self._ihist(ctx)
-        self.v_prev = v
+        self.i_prev = x[self.br[0]]
+        self.v_prev = self.voltage(x)
 
     def current(self, x):
         return self.i_prev
@@ -181,7 +219,7 @@ class CoupledInductors(Element):
     def stamp_A(self, A, ctx):
         a, b, c, d = self.idx
         k1, k2 = self.br
-        f = (2.0 if ctx.method == "trap" else 1.0) / ctx.dt
+        f = self._f(ctx)
         for n, s in ((a, 1), (b, -1)):
             if n >= 0:
                 A[n, k1] += s
@@ -195,9 +233,23 @@ class CoupledInductors(Element):
         A[k2, k1] -= f * self.m
         A[k2, k2] -= f * self.l2
 
+    @staticmethod
+    def _f(ctx):
+        if ctx.method == "dc":
+            return 0.0
+        return (2.0 if ctx.method == "trap" else 1.0) / ctx.dt
+
+    def stamp_ac(self, Y, rhs, w, ctx):
+        self.stamp_A(Y, ctx)
+        k1, k2 = self.br
+        Y[k1, k1] -= 1j * w * self.l1
+        Y[k1, k2] -= 1j * w * self.m
+        Y[k2, k1] -= 1j * w * self.m
+        Y[k2, k2] -= 1j * w * self.l2
+
     def stamp_b(self, rhs, ctx):
         k1, k2 = self.br
-        f = (2.0 if ctx.method == "trap" else 1.0) / ctx.dt
+        f = self._f(ctx)
         r1 = -f * (self.l1 * self.i1 + self.m * self.i2)
         r2 = -f * (self.m * self.i1 + self.l2 * self.i2)
         if ctx.method == "trap":
@@ -231,15 +283,23 @@ class VoltageSource(Element):
     """
     n_branch = 1
 
-    def __init__(self, name, a, b, value=0.0, signal=None, gain=1.0):
+    def __init__(self, name, a, b, value=0.0, signal=None, gain=1.0, ac=0.0, ac_phase=0.0, dc=None):
         super().__init__(name, a, b)
         self.wave = as_waveform(value)
         self.signal, self.gain = signal, float(gain)
+        self.ac, self.ac_phase = float(ac), float(ac_phase)
+        self.dc = None if dc is None else float(dc)   # value used by DC analyses (SPICE 'DC')
 
     def value(self, ctx):
+        if ctx.method == "dc" and self.dc is not None:
+            return self.dc * ctx.source_scale
         if self.signal is not None:
-            return self.gain * ctx.signals[self.signal]
-        return self.wave(ctx.t)
+            return self.gain * ctx.signals[self.signal] * ctx.source_scale
+        return self.wave(ctx.t) * ctx.source_scale
+
+    def phasor(self):
+        """AC small-signal excitation (magnitude ac, phase ac_phase deg)."""
+        return self.ac * np.exp(1j * np.radians(self.ac_phase))
 
     def stamp_A(self, A, ctx):
         a, b = self.idx
@@ -254,6 +314,10 @@ class VoltageSource(Element):
     def stamp_b(self, rhs, ctx):
         rhs[self.br[0]] += self.value(ctx)
 
+    def stamp_ac(self, Y, rhs, w, ctx):
+        self.stamp_A(Y, ctx)
+        rhs[self.br[0]] += self.phasor()
+
     def current(self, x):
         return x[self.br[0]]
 
@@ -262,20 +326,31 @@ class CurrentSource(Element):
     """Independent or signal-controlled current source; current flows from a
     to b through the source (out of node b into the external circuit)."""
 
-    def __init__(self, name, a, b, value=0.0, signal=None, gain=1.0):
+    def __init__(self, name, a, b, value=0.0, signal=None, gain=1.0, ac=0.0, ac_phase=0.0, dc=None):
         super().__init__(name, a, b)
         self.wave = as_waveform(value)
         self.signal, self.gain = signal, float(gain)
+        self.ac, self.ac_phase = float(ac), float(ac_phase)
+        self.dc = None if dc is None else float(dc)   # value used by DC analyses (SPICE 'DC')
         self._i = 0.0
 
     def value(self, ctx):
+        if ctx.method == "dc" and self.dc is not None:
+            return self.dc * ctx.source_scale
         if self.signal is not None:
-            return self.gain * ctx.signals[self.signal]
-        return self.wave(ctx.t)
+            return self.gain * ctx.signals[self.signal] * ctx.source_scale
+        return self.wave(ctx.t) * ctx.source_scale
+
+    def phasor(self):
+        """AC small-signal excitation (magnitude ac, phase ac_phase deg)."""
+        return self.ac * np.exp(1j * np.radians(self.ac_phase))
 
     def stamp_b(self, rhs, ctx):
         self._i = self.value(ctx)
         stamp_i(rhs, self.idx[0], self.idx[1], self._i)
+
+    def stamp_ac(self, Y, rhs, w, ctx):
+        stamp_i(rhs, self.idx[0], self.idx[1], self.phasor())
 
     def current(self, x):
         return self._i
@@ -502,7 +577,11 @@ class DCMotor(Element):
         if b >= 0:
             A[b, ki] -= 1
             A[ki, b] -= 1
-        if trap:
+        if ctx.method == "dc":
+            A[ki, ki] -= self.ra
+            A[kw, ki] -= self.kt
+            A[kw, kw] += self.bf
+        elif trap:
             A[ki, ki] -= self.ra + 2 * self.la / ctx.dt
             A[kw, ki] -= self.kt / 2
             A[kw, kw] += self.j / ctx.dt + self.bf / 2
@@ -516,13 +595,30 @@ class DCMotor(Element):
         ki, kw = self.br
         tl = self._tl(ctx)
         self._tl_now = tl
-        if ctx.method == "trap":
+        if ctx.method == "dc":
+            rhs[kw] -= tl
+        elif ctx.method == "trap":
             rhs[ki] += -self.v_prev + (self.ra - 2 * self.la / ctx.dt) * self.i_prev + self.ke * self.w_prev
             rhs[kw] += self.kt / 2 * self.i_prev + (self.j / ctx.dt - self.bf / 2) * self.w_prev \
                 - 0.5 * (tl + self.tl_prev)
         else:
             rhs[ki] += -self.la / ctx.dt * self.i_prev
             rhs[kw] += self.j / ctx.dt * self.w_prev - tl
+
+    def stamp_ac(self, Y, rhs, w, ctx):
+        """Small-signal model (load torque held constant)."""
+        a, b = self.idx
+        ki, kw = self.br
+        if a >= 0:
+            Y[a, ki] += 1
+            Y[ki, a] += 1
+        if b >= 0:
+            Y[b, ki] -= 1
+            Y[ki, b] -= 1
+        Y[ki, ki] -= self.ra + 1j * w * self.la
+        Y[ki, kw] -= self.ke
+        Y[kw, ki] -= self.kt
+        Y[kw, kw] += self.bf + 1j * w * self.j
 
     def update(self, x, ctx):
         self.i_prev = x[self.br[0]]

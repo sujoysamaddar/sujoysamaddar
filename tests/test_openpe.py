@@ -475,3 +475,23 @@ def test_cli_runs_netlist(tmp_path, capsys):
     # underdamped series RLC, zeta = 0.25 -> 44.4 % overshoot
     val = float(out.split("max V(b)")[1].split("=")[1].split()[0])
     assert val == pytest.approx(10 * (1 + math.exp(-math.pi * 0.25 / math.sqrt(1 - 0.0625))), rel=2e-3)
+
+
+def test_power_balance_with_floating_island():
+    """Regression: a mains-fed bridge floating behind a 1 Mohm reference is
+    ill-conditioned; companion-model currents must still satisfy KCL."""
+    c = pe.Circuit()
+    c.V("Vac", "l", "n", pe.Sine(325, 50))
+    c.R("Rgnd", "n", "0", 1e6)
+    c.D("D1", "l", "p")
+    c.D("D2", "n", "p")
+    c.D("D3", "m", "l")
+    c.D("D4", "m", "n")
+    c.C("Co", "p", "m", 470e-6, ic=300)
+    c.R("RL", "p", "m", 400)
+    r = c.simulate(1e-6, 0.1, t_record_start=0.06)
+    w = r.last(0.04)
+    kcl = w["I(D1)"] + w["I(D2)"] - w["I(Co)"] - w["I(RL)"]
+    assert np.max(np.abs(kcl)) < 1e-4
+    pin, pout = -w.power("Vac"), w.power("RL") + w.power("Co")
+    assert pin == pytest.approx(pout, rel=5e-3)

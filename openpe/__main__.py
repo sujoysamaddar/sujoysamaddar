@@ -43,9 +43,32 @@ def main(argv=None):
         return 0
 
     nl = load(args.netlist)
-    if not nl.tran:
-        print("netlist has no .tran directive", file=sys.stderr)
+    if not nl.tran and not nl.analyses:
+        print("netlist has no analysis directive (.tran, .op, .dc, .ac)", file=sys.stderr)
         return 2
+    plot_names = [n for g in nl.plots for n in g]
+    stem = args.plot[:-4] if args.plot and args.plot.lower().endswith(".png") else args.plot
+    for a in nl.analyses:
+        if a[0] == "op":
+            print(nl.op().table())
+        elif a[0] == "dc":
+            r = nl.dc()
+            print(f"DC sweep of {a[1]}: {len(r.t)} points")
+            if args.plot or args.show:
+                names = [n for n in plot_names if n in r] or [f"V({n})" for n in r.names[:1]]
+                r.plot(*[[n] for n in names], save=f"{stem}_dc.png" if stem else None, show=args.show)
+        elif a[0] == "ac":
+            r = nl.ac()
+            outs = [n for n in plot_names if n.startswith("V(")] or [f"V({list(r._node)[-1]})"]
+            for o in outs:
+                f_pk, g_pk = r.peak(o)
+                lo, hi = r.corners(o)
+                print(f"AC {o}: peak gain {g_pk:.2f} dB at {f_pk:.4g} Hz, "
+                      f"-3 dB corners: low {lo:.4g} Hz, high {hi:.4g} Hz")
+            if args.plot or args.show:
+                r.plot(*outs, save=f"{stem}_ac.png" if stem else None, show=args.show)
+    if not nl.tran:
+        return 0
     res = nl.run()
     st = res.meta["stats"]
     print(f"{nl.circuit.title}: {st['steps']} steps, {st['factorizations']} matrix factorisations, "
@@ -54,7 +77,6 @@ def main(argv=None):
     mres = res.last(window) if window else res
     for m in nl.measures:
         print(f"  {' '.join(m):<30} = {_measure(mres, m):.6g}")
-    plot_names = [n for g in nl.plots for n in g]
     if args.summary:
         mres.summary(plot_names or None)
     if args.csv:

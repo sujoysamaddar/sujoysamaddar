@@ -1,5 +1,6 @@
 """Circuit container: a power circuit (elements) plus a control circuit (blocks)."""
 from . import control as ctl
+from . import devices as dv
 from . import elements as el
 
 
@@ -111,9 +112,56 @@ class Circuit:
     def T(self, name, p1, p2, s1, s2, n, **kw):
         return self.add(el.Transformer(name, p1, p2, s1, s2, n, **kw))
 
+    # analog / electronic parts
+    def Dpn(self, name, a, k, **kw):
+        """Shockley (exponential) diode."""
+        return self.add(dv.PNDiode(name, a, k, **kw))
+
+    def Z(self, name, a, k, bv, **kw):
+        return self.add(dv.Zener(name, a, k, bv, **kw))
+
+    def Q(self, name, c, b, e, polarity="npn", **kw):
+        return self.add(dv.BJT(name, c, b, e, polarity, **kw))
+
+    def M(self, name, d, g, s, polarity="nmos", **kw):
+        return self.add(dv.MOSFET(name, d, g, s, polarity, **kw))
+
+    def E(self, name, op, on, ip, inn, gain):
+        return self.add(dv.VCVS(name, op, on, ip, inn, gain))
+
+    def G(self, name, op, on, ip, inn, gm):
+        return self.add(dv.VCCS(name, op, on, ip, inn, gm))
+
+    def F(self, name, op, on, ctrl, gain):
+        return self.add(dv.CCCS(name, op, on, ctrl, gain))
+
+    def H(self, name, op, on, ctrl, r):
+        return self.add(dv.CCVS(name, op, on, ctrl, r))
+
+    def opamp(self, name, inp, inn, out, **kw):
+        return self.add(dv.OpAmp(name, inp, inn, out, **kw))
+
+    # ------------------------------------------------------------------
+    # analyses
     def simulate(self, dt, t_end, **kw):
+        """Transient analysis (.tran)."""
         from .simulator import Simulator
         return Simulator(self, dt, t_end, **kw).run()
+
+    def op(self, **kw):
+        """DC operating point (.op)."""
+        from .simulator import Simulator
+        return Simulator(self, 1e-6, 0.0, **kw).operating_point()
+
+    def dc(self, source, values, **kw):
+        """DC sweep (.dc) of an independent source."""
+        from .simulator import Simulator
+        return Simulator(self, 1e-6, 0.0, **kw).dc_sweep(source, values)
+
+    def ac(self, freqs, source=None, **kw):
+        """AC small-signal analysis (.ac)."""
+        from .simulator import Simulator
+        return Simulator(self, 1e-6, 0.0, **kw).ac_analysis(freqs, source)
 
     def __repr__(self):
         return f"Circuit({self.title!r}, {len(self.elements)} elements, {len(self.blocks)} blocks)"

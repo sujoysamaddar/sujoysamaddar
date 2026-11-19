@@ -149,3 +149,11 @@ def serve(host="127.0.0.1", port=8765, open_browser=True):
         print("\nstopped")
     finally:
         httpd.server_close()
+
+
+if __name__ == "__main__":
+    # Allow "Run" on this file directly (e.g. from PyCharm).
+    import sys as _sys
+    _sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from openpe.server import serve as _serve
+    _serve()

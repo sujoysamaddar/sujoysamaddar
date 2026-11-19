@@ -140,6 +140,21 @@ local server, which binds to `127.0.0.1` and only parses netlists.
 
 ---
 
+## Running in PyCharm
+
+1. **Open the project.** Clone it (File → New → Project from Version Control) and check out `main`.
+2. **Pick an interpreter.** Settings → Project → Python Interpreter → Add Interpreter → new Virtualenv, Python 3.10 or newer.
+3. **Install the requirements.** Open `requirements.txt` and click **Install requirements** in the banner, or run `pip install -r requirements.txt` in PyCharm's terminal. Installing the package itself isn't needed.
+4. **Run.** Three ready-made run configurations appear in the Run menu, or right-click the matching file → **Run**:
+
+   | Run configuration | File | What it does |
+   |---|---|---|
+   | **OpenPE editor** | `main.py` | Starts the drag-and-drop schematic editor in your browser |
+   | **Run all examples** | `run_examples.py` | Runs every script in `examples/` and saves plots to `examples/output/` |
+   | **Run tests** | `run_tests.py` | Runs the pytest suite |
+
+   You can also right-click any single file in `examples/`, or run `openpe/__main__.py` or `openpe/server.py` directly.
+
 ## Installation
 
 ```bash
@@ -304,11 +319,13 @@ openpe/
   netlist.py     text netlist parser
   server.py      local web server for the schematic editor (/api/simulate)
   editor/        the drag-and-drop schematic editor (single HTML file, no dependencies)
-  __main__.py    command-line interface (run, editor, blocks)
+  __main__.py    command-line interface (run, editor, blocks); no arguments = editor
 examples/        runnable showcase scripts (+ output/ plots)
 circuits/        example netlists
 tests/           pytest suite (analytic checks of every feature, editor API, browser e2e)
 docs/            screenshots
+main.py, run_examples.py, run_tests.py   one-click launchers (also as PyCharm run configs in .run/)
+requirements.txt                          numpy, matplotlib, pytest
 ```
 
 ## License

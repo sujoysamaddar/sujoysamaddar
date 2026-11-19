@@ -1,6 +1,18 @@
-"""Command line: python -m openpe run circuit.net [--plot out.png] [--csv out.csv]"""
+"""Command line: python -m openpe run circuit.net [--plot out.png] [--csv out.csv]
+
+Also works when this file is run directly (e.g. PyCharm: right-click > Run),
+and with no arguments it starts the schematic editor.
+"""
 import argparse
+import os
 import sys
+
+if __package__ in (None, ""):
+    # Executed as a plain file rather than "python -m openpe": make the
+    # package importable so the relative imports below work.
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    import openpe  # noqa: F401
+    __package__ = "openpe"
 
 from .netlist import load
 
@@ -26,7 +38,7 @@ def _measure(res, spec):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="openpe", description="OpenPE power-electronics simulator")
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub = ap.add_subparsers(dest="cmd")
     r = sub.add_parser("run", help="simulate a netlist")
     r.add_argument("netlist")
     r.add_argument("--plot", help="save waveform plot (PNG)")
@@ -39,6 +51,12 @@ def main(argv=None):
     ed.add_argument("--port", type=int, default=8765)
     ed.add_argument("--host", default="127.0.0.1")
     ed.add_argument("--no-browser", action="store_true", help="do not open a browser window")
+    if argv is None:
+        argv = sys.argv[1:]
+    if not argv:                      # no command: start the schematic editor
+        print("No command given - starting the schematic editor "
+              "(use 'run <file.net>' to simulate a netlist, '-h' for help).")
+        argv = ["editor"]
     args = ap.parse_args(argv)
 
     if args.cmd == "editor":

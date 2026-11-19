@@ -410,7 +410,7 @@ def _parse_block(pos, kw):
 
 
 def load(path):
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         text = f.read()
     import os
     return parse(text, title=os.path.splitext(os.path.basename(path))[0])

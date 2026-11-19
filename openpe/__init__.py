@@ -8,6 +8,17 @@ plus SPICE-style analog analyses (DC operating point, DC sweep, AC
 small-signal, Monte Carlo) with nonlinear semiconductor devices,
 controlled sources and op-amps.
 """
+import sys as _sys
+
+if _sys.version_info < (3, 10):
+    raise ImportError(f"OpenPE needs Python 3.10 or newer (this interpreter is {_sys.version.split()[0]}). "
+                      "In PyCharm: Settings > Project > Python Interpreter.")
+try:
+    import numpy as _np  # noqa: F401
+except ImportError as _exc:
+    raise ImportError("OpenPE needs numpy. Install the requirements with:  pip install -r requirements.txt  "
+                      "(PyCharm: open requirements.txt and click 'Install requirements').") from _exc
+
 from . import control, devices, elements, waveforms
 from .analysis import (MonteCarloResult, ac_sweep, format_table, monte_carlo, parameter_sweep, plot_bode,
                        tf_response)

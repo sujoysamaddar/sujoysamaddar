@@ -164,7 +164,7 @@ class Results:
 
     def to_csv(self, path, names=None):
         names = names or self.names
-        with open(path, "w", newline="") as f:
+        with open(path, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             w.writerow(["time"] + names)
             cols = [self[n] for n in names]

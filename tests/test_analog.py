@@ -395,3 +395,13 @@ def test_netlist_shockley_and_zener_diode_selection():
     nl = pe.parse_netlist("V1 a 0 DC 1\nD1 a k is=1e-14\nD2 k 0\nD3 0 a bv=5\n.op\n")
     types = {e.name: type(e).__name__ for e in nl.circuit.elements}
     assert types == {"V1": "VoltageSource", "D1": "PNDiode", "D2": "Diode", "D3": "PNDiode"}
+
+
+def test_dc_sweep_overrides_separate_dc_value():
+    """Regression: sweeping a source that has both a DC value and a
+    transient waveform must sweep the DC value."""
+    c = pe.Circuit()
+    c.V("V1", "a", "0", pe.Sine(1, 1e3), dc=1.0)
+    c.R("R1", "a", "0", 1e3)
+    r = c.dc("V1", [0.0, 0.5, 2.0])
+    assert list(r["V(a)"]) == pytest.approx([0.0, 0.5, 2.0])

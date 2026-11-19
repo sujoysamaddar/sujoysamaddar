@@ -35,7 +35,16 @@ def main(argv=None):
     r.add_argument("--summary", action="store_true", help="print mean/rms/min/max of plotted signals")
     r.add_argument("--window", type=float, help="measure over the last N seconds only")
     sub.add_parser("blocks", help="list control block types")
+    ed = sub.add_parser("editor", help="start the drag-and-drop schematic editor in a browser")
+    ed.add_argument("--port", type=int, default=8765)
+    ed.add_argument("--host", default="127.0.0.1")
+    ed.add_argument("--no-browser", action="store_true", help="do not open a browser window")
     args = ap.parse_args(argv)
+
+    if args.cmd == "editor":
+        from .server import serve
+        serve(args.host, args.port, open_browser=not args.no_browser)
+        return 0
 
     if args.cmd == "blocks":
         from .netlist import BLOCK_TYPES

@@ -5,3 +5,5 @@ build/
 dist/
 .pytest_cache/
 *.csv
+node_modules/
+package-lock.json

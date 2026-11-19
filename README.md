@@ -58,6 +58,36 @@ res = amp.simulate(2e-6, 5e-3, initial="op")      # .tran from the bias point
 print(res.thd("V(c)", 1e3, cycles=2))             # harmonic distortion
 ```
 
+## Desktop GUI: OpenPE Studio
+
+```bash
+python gui.py                    # or: python main.py, python -m openpe, python -m openpe gui file.net
+```
+
+<p align="center"><img src="docs/studio.png" width="90%" alt="OpenPE Studio desktop window"></p>
+
+OpenPE Studio is a native desktop window built on Tkinter and matplotlib.
+Both ship with the python.org installers, so there's nothing extra to
+install.
+
+* **Library:** all bundled netlists and example scripts. Double-click a
+  netlist to open it, or a script to run it.
+* **Netlist editor:** syntax colouring, plus New, Open, Save and Save as.
+* **Running:** ▶ Run (`F5`) simulates in the background, so the window
+  stays responsive.
+* **Result tabs:**
+  * **Waveforms:** pick signals, stacked or overlaid, with matplotlib's
+    zoom, pan and save toolbar, engineering-unit axes and `.measure`
+    results.
+  * **AC analysis:** Bode plots with the −3 dB corners marked.
+  * **DC sweep:** sweep curves.
+  * **Operating point:** a table of node voltages, currents and device
+    values.
+  * **Script plots:** the PNGs produced by the example script you just ran.
+  * **Log:** messages and errors.
+* **Other:** export waveforms to CSV, and open the drag-and-drop schematic
+  editor (below) from the Tools menu or toolbar.
+
 ## Drag-and-drop schematic editor
 
 ```bash
@@ -149,7 +179,8 @@ local server, which binds to `127.0.0.1` and only parses netlists.
 
    | Run configuration | File | What it does |
    |---|---|---|
-   | **OpenPE editor** | `main.py` | Starts the drag-and-drop schematic editor in your browser |
+   | **OpenPE Studio (GUI)** | `gui.py` | Opens the desktop application window |
+   | **Schematic editor (browser)** | `main.py editor` | Starts the drag-and-drop schematic editor in your browser |
    | **Run all examples** | `run_examples.py` | Runs every script in `examples/` and saves plots to `examples/output/` |
    | **Run tests** | `run_tests.py` | Runs the pytest suite |
 
@@ -317,14 +348,15 @@ openpe/
   results.py     waveform analysis, plots, CSV
   analysis.py    parameter sweep, injection AC sweep, Monte Carlo, Bode helpers
   netlist.py     text netlist parser
+  gui.py         OpenPE Studio desktop GUI (Tkinter + matplotlib)
   server.py      local web server for the schematic editor (/api/simulate)
   editor/        the drag-and-drop schematic editor (single HTML file, no dependencies)
-  __main__.py    command-line interface (run, editor, blocks); no arguments = editor
+  __main__.py    command-line interface (gui, editor, run, blocks); no arguments = desktop GUI
 examples/        runnable showcase scripts (+ output/ plots)
 circuits/        example netlists
 tests/           pytest suite (analytic checks of every feature, editor API, browser e2e)
 docs/            screenshots
-main.py, run_examples.py, run_tests.py   one-click launchers (also as PyCharm run configs in .run/)
+gui.py, main.py, run_examples.py, run_tests.py   one-click launchers (also as PyCharm run configs in .run/)
 requirements.txt                          numpy, matplotlib, pytest
 ```
 

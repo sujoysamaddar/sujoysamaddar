@@ -47,17 +47,30 @@ def main(argv=None):
     r.add_argument("--summary", action="store_true", help="print mean/rms/min/max of plotted signals")
     r.add_argument("--window", type=float, help="measure over the last N seconds only")
     sub.add_parser("blocks", help="list control block types")
+    gui = sub.add_parser("gui", help="start OpenPE Studio, the desktop GUI (default)")
+    gui.add_argument("netlist", nargs="?", help="netlist to open")
     ed = sub.add_parser("editor", help="start the drag-and-drop schematic editor in a browser")
     ed.add_argument("--port", type=int, default=8765)
     ed.add_argument("--host", default="127.0.0.1")
     ed.add_argument("--no-browser", action="store_true", help="do not open a browser window")
     if argv is None:
         argv = sys.argv[1:]
-    if not argv:                      # no command: start the schematic editor
-        print("No command given - starting the schematic editor "
-              "(use 'run <file.net>' to simulate a netlist, '-h' for help).")
-        argv = ["editor"]
+    if not argv:                      # no command: start the desktop GUI
+        print("No command given - starting OpenPE Studio (desktop GUI). "
+              "Other commands: 'editor', 'run <file.net>', '-h' for help.")
+        argv = ["gui"]
     args = ap.parse_args(argv)
+
+    if args.cmd == "gui":
+        try:
+            from .gui import main as gui_main
+        except ImportError as exc:
+            print(f"Desktop GUI unavailable: {exc}\nStarting the browser-based schematic editor instead.",
+                  file=sys.stderr)
+            from .server import serve
+            serve()
+            return 0
+        return gui_main(args.netlist)
 
     if args.cmd == "editor":
         from .server import serve
